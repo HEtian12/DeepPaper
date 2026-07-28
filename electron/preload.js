@@ -1,0 +1,24 @@
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
+
+contextBridge.exposeInMainWorld("deepPaper", {
+  choosePdf: () => ipcRenderer.invoke("papers:choosePdf"),
+  chooseImage: () => ipcRenderer.invoke("papers:chooseImage"),
+  extractPdf: (filePath) => ipcRenderer.invoke("papers:extractPdf", filePath),
+  extractImage: (filePath) => ipcRenderer.invoke("papers:extractImage", filePath),
+  openPdf: (filePath) => ipcRenderer.invoke("papers:openFile", filePath),
+  openExistingFile: (filePath) => ipcRenderer.invoke("papers:openExistingFile", filePath),
+  openFileWithApp: (filePath) => ipcRenderer.invoke("papers:openFileWithApp", filePath),
+  openFileLocation: (filePath) => ipcRenderer.invoke("papers:openFileLocation", filePath),
+  openExistingFileLocation: (filePath) => ipcRenderer.invoke("papers:openExistingFileLocation", filePath),
+  fileUrlForPath: (filePath) => ipcRenderer.invoke("papers:fileUrl", filePath),
+  readPdfBytes: (filePath) => ipcRenderer.invoke("papers:readPdf", filePath),
+  locateMovedFile: (payload) => ipcRenderer.invoke("papers:locateMovedFile", payload),
+  openExternal: (url) => ipcRenderer.invoke("papers:openExternal", url),
+  importLibrary: () => ipcRenderer.invoke("library:import"),
+  exportLibrary: (payload) => ipcRenderer.invoke("library:export", payload),
+  getPathForFile: (file) => webUtils.getPathForFile(file),
+  analyzeWithDeepSeek: (payload) => ipcRenderer.invoke("deepseek:analyze", payload),
+  chatWithDeepSeek: (payload) => ipcRenderer.invoke("deepseek:chat", payload),
+  chatWithLibrary: (payload) => ipcRenderer.invoke("library:ai-chat", payload),
+  getDeepSeekBalance: (apiKey) => ipcRenderer.invoke("deepseek:balance", apiKey)
+});

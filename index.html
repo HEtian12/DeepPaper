@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DeepPaper</title>
+    <link rel="stylesheet" href="./node_modules/pdfjs-dist/legacy/web/pdf_viewer.css" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app" id="appShell">
+      <aside class="sidebar">
+        <header class="brand">
+          <div class="brand-row">
+            <div>
+              <h1>DeepPaper</h1>
+              <p>AI 文献解析工作台</p>
+            </div>
+            <button id="toggleConfigBtn" class="secondary small-btn">配置</button>
+          </div>
+        </header>
+
+        <section id="configPanel" class="panel config-panel collapsed">
+          <div class="library-actions">
+            <button id="importLibraryBtn" class="secondary">导入库</button>
+            <button id="exportLibraryBtn" class="secondary">导出库</button>
+          </div>
+
+          <label>AI 服务商</label>
+          <select id="providerSelect">
+            <option value="deepseek">DeepSeek</option>
+            <option value="doubao">豆包 / 火山方舟</option>
+          </select>
+
+          <label>API Key</label>
+          <input id="apiKeyInput" type="password" placeholder="sk-..." />
+
+          <label>模型</label>
+          <input id="modelSelect" list="modelOptions" placeholder="deepseek-chat 或豆包 endpoint/model id" />
+          <datalist id="modelOptions">
+            <option value="deepseek-chat"></option>
+            <option value="deepseek-reasoner"></option>
+            <option value="doubao-1-5-vision-pro-32k"></option>
+            <option value="doubao-1-5-pro-32k"></option>
+          </datalist>
+
+          <div class="button-row">
+            <button id="saveKeyBtn" class="secondary">保存配置</button>
+            <button id="checkBalanceBtn" class="secondary">查询余额</button>
+          </div>
+          <div id="balanceInfo" class="balance-info">未查询余额</div>
+
+          <label>界面风格</label>
+          <select id="themeSelect">
+            <option value="standard">标准浅色</option>
+            <option value="ink">墨绿风格</option>
+            <option value="warm">暖色纸面</option>
+            <option value="dark">深色模式</option>
+          </select>
+        </section>
+
+        <section class="panel">
+          <button id="importPdfBtn" class="primary">导入 PDF</button>
+          <button id="importImageBtn" class="secondary">导入图片</button>
+          <div id="dropZone" class="drop-zone">拖入 PDF 或图片文件</div>
+        </section>
+
+        <section class="panel">
+          <label>全文检索</label>
+          <div class="search-row">
+            <input id="fullTextSearchInput" type="search" placeholder="如：不平衡 长尾 分布" />
+            <select id="fullTextSearchMode">
+              <option value="or">OR</option>
+              <option value="and">AND</option>
+            </select>
+          </div>
+
+          <label>关键词检索</label>
+          <div class="search-row">
+            <input id="keywordSearchInput" type="search" placeholder="如：对比学习 面部动作单元" />
+            <select id="keywordSearchMode">
+              <option value="or">OR</option>
+              <option value="and">AND</option>
+            </select>
+          </div>
+          <div id="keywordSuggestions" class="keyword-suggestions"></div>
+        </section>
+
+        <section class="panel">
+          <div class="section-title">关键词</div>
+          <div id="keywordList" class="chip-list"></div>
+        </section>
+      </aside>
+
+      <div class="column-resizer" data-resizer="left" title="拖动调整左侧宽度"></div>
+
+      <main class="main">
+        <div class="main-sticky">
+          <header class="toolbar">
+            <div>
+              <p class="eyebrow">本地文献库</p>
+              <h2 id="libraryTitle">0 篇论文</h2>
+            </div>
+            <div class="toolbar-actions">
+              <button id="analyzeAllBtn" class="secondary">解析未解析</button>
+              <button id="analyzeSelectedBtn" class="secondary">解析选中</button>
+              <button id="deleteSelectedBtn" class="secondary danger">删除选中</button>
+              <button id="favoriteFilterBtn" class="secondary">合集</button>
+              <button id="openCorpusBtn" class="secondary">语料库</button>
+              <select id="globalLanguageSelect">
+                <option value="zh">全局中文</option>
+                <option value="en">全局英文</option>
+              </select>
+              <select id="sortSelect">
+                <option value="newest">最新导入</option>
+                <option value="year-desc">年份从新到旧</option>
+                <option value="title">标题 A-Z</option>
+              </select>
+              <button id="manageBtn" class="secondary">管理</button>
+            </div>
+          </header>
+
+          <section id="collectionMenu" class="collection-menu hidden"></section>
+
+          <section id="statusBar" class="status">就绪：导入 PDF、拖入 PDF，或导入旧电脑导出的文献库。</section>
+
+          <section id="managePanel" class="manage-panel hidden">
+            <div class="manage-actions">
+              <button id="detectDuplicatesBtn" class="secondary">检测疑似重复</button>
+              <button id="removeDuplicatesBtn" class="secondary danger">删除每组多余项</button>
+              <button id="clearLibraryBtn" class="secondary danger">清空文献库</button>
+            </div>
+            <div id="duplicateReport" class="duplicate-report">尚未检测重复论文。</div>
+          </section>
+        </div>
+
+        <section id="paperList" class="paper-list"></section>
+      </main>
+
+      <div class="column-resizer" data-resizer="right" title="拖动调整右侧宽度"></div>
+
+      <aside class="detail">
+        <div id="detailPanel" class="empty">选择一篇论文查看解析结果。</div>
+      </aside>
+    </div>
+
+    <button id="selectionAddBtn" class="selection-add hidden">加入语料库</button>
+
+    <section id="corpusPanel" class="corpus-panel hidden">
+      <header class="corpus-header">
+        <div>
+          <p class="eyebrow">摘录库</p>
+          <h2 id="corpusTitle">0 条语料</h2>
+        </div>
+        <button id="closeCorpusBtn" class="secondary small-btn">关闭</button>
+      </header>
+
+      <div class="corpus-tools">
+        <input id="corpusSearchInput" type="search" placeholder="检索摘录、来源论文、标签或备注" />
+        <select id="corpusTypeFilter">
+          <option value="">全部类型</option>
+          <option value="动机">动机</option>
+          <option value="Gap">Gap</option>
+          <option value="方法">方法</option>
+          <option value="贡献">贡献</option>
+          <option value="结果">结果</option>
+          <option value="写作用句">写作用句</option>
+          <option value="其他">其他</option>
+        </select>
+      </div>
+
+      <div id="corpusList" class="corpus-list"></div>
+    </section>
+
+    <script src="./app.js"></script>
+    <script src="./pdf-reader.js"></script>
+    <script src="./library-ai.js"></script>
+  </body>
+</html>
