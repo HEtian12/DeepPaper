@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  desktop:
+    name: Windows integration
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      DEEPPAPER_SMOKE_SCREENSHOT_DIR: artifacts/screenshots
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run test:e2e
+      - name: Upload smoke screenshots
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-smoke-screenshots
+          path: artifacts/screenshots/*.png
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Build portable app on manual runs
+        if: github.event_name == 'workflow_dispatch'
+        run: npm run dist -- --publish never
+      - name: Upload portable app
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v7
+        with:
+          name: DeepPaper-windows-portable
+          path: dist/*.exe
+          if-no-files-found: error
+          retention-days: 7

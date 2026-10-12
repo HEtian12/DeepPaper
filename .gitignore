@@ -7,3 +7,6 @@ dist/
 *.pem
 *.exe
 deeppaper-library-*.json
+artifacts/
+coverage/
+test-results/
