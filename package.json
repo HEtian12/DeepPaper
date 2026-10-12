@@ -14,7 +14,7 @@
     "test:e2e": "npm run smoke:pdf-reader",
     "check": "node --check electron/main.js && node --check electron/preload.js && node --check app.js && node --check pdf-reader.js && node --check library-ai.js && node --check rag.js && node --check vector-store.js && node --check agent.js && node scripts/check-pdf-reader.js && node scripts/check-library-ai.js && node scripts/check-rag.js && node scripts/check-vector-store.js && node scripts/check-agent.js",
     "smoke:pdf-reader": "node scripts/smoke-pdf-reader.e2e.js",
-    "dist": "electron-builder --win portable"
+    "dist": "node scripts/build-portable.js"
   },
   "dependencies": {
     "pdf-parse": "^1.1.1",
