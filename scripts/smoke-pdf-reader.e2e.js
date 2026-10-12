@@ -1,4 +1,5 @@
 const fs = require("fs");
+const http = require("http");
 const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
@@ -9,9 +10,16 @@ const testRoot = fs.mkdtempSync(path.join(os.tmpdir(), "deeppaper-pdf-reader-"))
 const userDataDir = path.join(testRoot, "profile");
 const pdfPath = path.join(testRoot, "reader-smoke.pdf");
 const port = 9300 + Math.floor(Math.random() * 500);
+const embeddingPort = port + 600;
 const targetText = "This sentence should enter the corpus.";
+const screenshotDir = path.resolve(process.env.DEEPPAPER_SMOKE_SCREENSHOT_DIR || path.join(os.tmpdir(), "deeppaper-ui-qa"));
 let electronProcess;
 let socket;
+let embeddingServer;
+let embeddingRequestCount = 0;
+let embeddingBatchRejectionCount = 0;
+let embeddingSingleFailureCount = 0;
+let multimodalEmbeddingRequestCount = 0;
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -124,6 +132,52 @@ async function waitForApp(client) {
 
 async function main() {
   createMinimalPdf(pdfPath);
+  embeddingServer = http.createServer((request, response) => {
+    let body = "";
+    request.on("data", (chunk) => { body += chunk; });
+    request.on("end", () => {
+      embeddingRequestCount += 1;
+      const payload = JSON.parse(body || "{}");
+      if (request.url?.endsWith("/embeddings/multimodal")) {
+        multimodalEmbeddingRequestCount += 1;
+        const textPart = Array.isArray(payload.input) && payload.input.length === 1 ? payload.input[0] : null;
+        if (textPart?.type !== "text" || !textPart.text) {
+          response.writeHead(400, { "Content-Type": "application/json" });
+          response.end(JSON.stringify({ error: { message: "multimodal endpoint requires typed text input" } }));
+          return;
+        }
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({
+          model: payload.model,
+          data: { embedding: String(textPart.text).includes("sentence") ? [1, 0, 0] : [0, 1, 0] }
+        }));
+        return;
+      }
+      const inputIsArray = Array.isArray(payload.input);
+      const inputs = inputIsArray ? payload.input : [payload.input];
+      if (inputIsArray) {
+        embeddingBatchRejectionCount += 1;
+        response.writeHead(500, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ error: { message: "embedding endpoint requires scalar input" } }));
+        return;
+      }
+      if (inputs.length === 1 && embeddingSingleFailureCount === 0) {
+        embeddingSingleFailureCount += 1;
+        response.writeHead(500, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ error: { message: "temporary embedding failure" } }));
+        return;
+      }
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({
+        model: payload.model,
+        data: inputs.map((text, index) => ({
+          index,
+          embedding: String(text).includes("sentence") ? [1, 0, 0] : [0, 1, 0]
+        }))
+      }));
+    });
+  });
+  await new Promise((resolve) => embeddingServer.listen(embeddingPort, "127.0.0.1", resolve));
   electronProcess = spawn(electronPath, [
     projectRoot,
     `--remote-debugging-port=${port}`,
@@ -142,20 +196,26 @@ async function main() {
   await waitForApp(client);
 
   const setup = await evaluate(client, `(async () => {
+    const extractedPages = await window.deepPaper.extractPdfPages(${JSON.stringify(pdfPath)});
     const paper = {
       id: "pdf-reader-smoke-paper",
       kind: "pdf",
       filePath: ${JSON.stringify(pdfPath)},
       fileName: "reader-smoke.pdf",
-      text: ${JSON.stringify(targetText)},
+      text: extractedPages.text || ${JSON.stringify(targetText)},
       title: "PDF Reader Smoke Paper",
       titleEn: "PDF Reader Smoke Paper",
       titleZh: "PDF 阅读器测试论文",
       year: "2026",
       venue: "Smoke Test",
-      pageCount: 1,
+      pageCount: extractedPages.pageCount || 1,
+      pageTextOffsets: extractedPages.pageTextOffsets || [],
       status: "已解析",
-      analysis: { keywords: ["阅读器测试"] }
+      keywords: ["待删除关键词", "全局删除关键词", "阅读器测试", "论文阅读", "文本提取", "本地文献", "PDF解析", "页面定位", "语料管理", "文献检索", "关键词编辑", "数据保存"],
+      analysis: {
+        keywords: ["待删除关键词", "全局删除关键词", "阅读器测试", "论文阅读", "文本提取", "本地文献", "PDF解析", "页面定位", "语料管理", "文献检索", "关键词编辑", "数据保存"],
+        method: { modules: ["待删除关键词"] }
+      }
     };
     papers = [paper];
     corpus = [{
@@ -174,22 +234,159 @@ async function main() {
     state.detailTab = "analysis";
     saveLibrary();
     saveCorpus();
+    render();
+    document.querySelector("#addKeywordBtn")?.click();
+    const keywordInput = document.querySelector("#keywordAddInput");
+    keywordInput.value = "新增关键词";
+    keywordInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    const keywordAdded = paperKeywords(papers[0]).includes("新增关键词")
+      && [...document.querySelectorAll(".keyword-token")].some((item) => item.textContent === "新增关键词");
+    const deleteButton = [...document.querySelectorAll(".keyword-token")].find((item) => item.textContent === "待删除关键词");
+    deleteButton?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+    const keywordDeleted = !paperKeywords(papers[0]).includes("待删除关键词")
+      && ![...document.querySelectorAll(".keyword-token")].some((item) => item.textContent === "待删除关键词");
+    const originalConfirm = window.confirm;
+    window.confirm = () => true;
+    const sidebarDeleteButton = [...document.querySelectorAll(".keyword-sidebar-chip")]
+      .find((item) => item.textContent === "全局删除关键词");
+    sidebarDeleteButton?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+    window.confirm = originalConfirm;
+    const sidebarKeywordDeleted = !paperKeywords(papers[0]).includes("全局删除关键词")
+      && ![...document.querySelectorAll(".keyword-sidebar-chip")].some((item) => item.textContent === "全局删除关键词");
+    const keywordCleanupReady = parseKeywords(["1正则化", "3D MRI（T1加权", "1. 正则化", "long explanatory English keyword"])
+      .join("|") === "L1 正则化|3D MRI（T1加权）|正则化";
     await showPaperSource(paper.id);
     const libraryAiCandidates = window.deepPaperLibraryAi?.retrieveCandidates?.(papers, "阅读器测试", 5) || [];
+    const ragIndex = window.deepPaperRag?.buildPassageIndex?.(papers);
+    const embeddingPassages = [
+      ...ragIndex.passages,
+      { ...ragIndex.passages[0], passageId: "pdf-reader-smoke-paper:rag:1:extra-1", text: "A second embedding passage." },
+      { ...ragIndex.passages[0], passageId: "pdf-reader-smoke-paper:rag:1:extra-2", text: "A third embedding passage." },
+      { ...ragIndex.passages[0], passageId: "pdf-reader-smoke-paper:rag:1:duplicate", text: ragIndex.passages[0].text }
+    ];
+    const ragCandidates = window.deepPaperRag?.searchPassages?.(ragIndex, "sentence", 5, {
+      extractTerms: window.deepPaperLibraryAi?.extractTerms,
+      termAliases: window.deepPaperLibraryAi?.termAliases
+    }) || [];
+    const embeddingConfig = {
+      embeddingEnabled: true,
+      embeddingBaseUrl: "http://127.0.0.1:${embeddingPort}/v1",
+      embeddingApiKey: "smoke-key",
+      embeddingModel: "smoke-embedding"
+    };
+    const indexed = await window.deepPaperVectorStore.indexPassages(
+      embeddingPassages,
+      embeddingConfig,
+      async (texts) => {
+        const response = await window.deepPaper.createEmbeddings({ ...embeddingConfig, input: texts });
+        if (!response.ok) throw new Error(response.error);
+        return response.vectors;
+      }
+    );
+    const vectorStatus = await window.deepPaperVectorStore.getStatus(embeddingPassages, embeddingConfig);
+    const metadataMap = await window.deepPaperVectorStore.getMetadataMap(embeddingPassages, embeddingConfig);
+    const queryEmbedding = await window.deepPaper.createEmbeddings({ ...embeddingConfig, input: ["sentence"] });
+    const multimodalEmbedding = await window.deepPaper.createEmbeddings({
+      ...embeddingConfig,
+      embeddingBaseUrl: "http://127.0.0.1:${embeddingPort}/v1/embeddings/multimodal",
+      embeddingModel: "doubao-embedding-vision-250615",
+      input: ["sentence", "another passage"]
+    });
+    const vectorMap = await window.deepPaperVectorStore.getVectorMap(embeddingPassages, embeddingConfig);
+    const hybridCandidates = window.deepPaperRag.searchPassagesHybrid(ragIndex, "unmatched semantic request", queryEmbedding.vectors[0], vectorMap, 5, {
+      extractTerms: window.deepPaperLibraryAi?.extractTerms,
+      termAliases: window.deepPaperLibraryAi?.termAliases
+    });
     document.querySelector("#openLibraryAiBtn")?.click();
     const libraryAiPanelOpen = !document.querySelector("#libraryAiPanel")?.classList.contains("hidden");
     document.querySelector("#closeLibraryAiBtn")?.click();
+    document.querySelector("#openDeepPaperAgentBtn")?.click();
+    const agentPanel = document.querySelector("#deepPaperAgentPanel");
+    const agentPanelOpen = Boolean(agentPanel && !agentPanel.classList.contains("hidden"));
+    const agentEmptyReady = Boolean(agentPanel?.querySelector("#agentGoalInput") && agentPanel?.querySelector("#agentRunBtn"));
+    const agentStopHidden = getComputedStyle(agentPanel?.querySelector("#agentStopBtn")).display === "none";
+    const semanticIndexReady = Boolean(window.deepPaperVectorStore?.getStatus && agentPanel?.querySelector("#agentBuildIndexBtn"));
+    document.querySelector("#editApiProfileBtn")?.click();
+    const profileModal = document.querySelector("#apiProfileModal");
+    const profileDialog = profileModal?.querySelector(".api-profile-dialog");
+    const profileBox = document.querySelector("#apiProfileBox");
+    const embeddingConfigReady = Boolean(
+      document.querySelector("#apiProfileEmbeddingEnabled")
+      && document.querySelector("#apiProfileEmbeddingBaseUrl")
+      && document.querySelector("#apiProfileEmbeddingModelInput")
+    );
+    const profileModalReady = Boolean(
+      profileModal
+      && !profileModal.classList.contains("hidden")
+      && profileDialog?.getBoundingClientRect().width > profileBox?.getBoundingClientRect().width
+      && !profileBox?.contains(document.querySelector("#apiProfileEditor"))
+      && document.querySelector("#apiProfileEditorTitle")?.textContent === "编辑接口"
+    );
+    const embeddingToggle = document.querySelector("#apiProfileEmbeddingEnabled");
+    embeddingToggle.checked = true;
+    embeddingToggle.dispatchEvent(new Event("change", { bubbles: true }));
+    const embeddingToggleReady = !document.querySelector("#embeddingFields")?.classList.contains("hidden")
+      && document.querySelector("#embeddingStatusText")?.textContent === "已启用";
+    embeddingToggle.checked = false;
+    embeddingToggle.dispatchEvent(new Event("change", { bubbles: true }));
+    document.querySelector("#closeApiProfileEditorBtn")?.click();
+    const profileModalClosed = profileModal?.classList.contains("hidden");
+    document.querySelector("#agentCloseBtn")?.click();
     return {
       hasReaderScript: typeof renderDetailWithSourceQuote === "function",
       sourceTab: state.detailTab,
       hasLibraryAiButton: Boolean(document.querySelector("#openLibraryAiBtn")),
       libraryAiPanelOpen,
-      libraryAiCandidateId: libraryAiCandidates[0]?.id || ""
+      libraryAiCandidateId: libraryAiCandidates[0]?.id || "",
+      hasAgentButton: Boolean(document.querySelector("#openDeepPaperAgentBtn")),
+      agentPanelOpen,
+      agentEmptyReady,
+      agentStopHidden,
+      semanticIndexReady,
+      embeddingConfigReady,
+      profileModalReady,
+      profileModalClosed,
+      embeddingToggleReady,
+      keywordAdded,
+      keywordDeleted,
+      sidebarKeywordDeleted,
+      keywordCleanupReady,
+      pageMapOk: Boolean(extractedPages.ok && extractedPages.pageTextOffsets?.[0]?.pageNumber === 1),
+      ragPageNumber: ragCandidates[0]?.pageNumber || 0,
+      ragPassageText: ragCandidates[0]?.text || "",
+      vectorIndexed: indexed.indexed,
+      vectorEmbedded: indexed.embedded,
+      vectorReused: indexed.reused,
+      vectorStatusIndexed: vectorStatus.indexed,
+      vectorMetadataOk: metadataMap.get(ragIndex.passages[0].passageId)?.pageNumber === 1
+        && metadataMap.get(ragIndex.passages[0].passageId)?.cleaningVersion === ragIndex.cleaningVersion,
+      multimodalEmbeddingOk: multimodalEmbedding.ok,
+      multimodalVectorCount: multimodalEmbedding.vectors?.length || 0,
+      hybridPassageId: hybridCandidates[0]?.passageId || "",
+      hybridMode: hybridCandidates[0]?.retrievalMode || ""
     };
   })()`);
   if (setup.sourceTab !== "source") throw new Error("DeepPaper did not switch to the source tab.");
   if (!setup.hasLibraryAiButton || !setup.libraryAiPanelOpen || setup.libraryAiCandidateId !== "pdf-reader-smoke-paper") {
     throw new Error(`Library AI integration did not initialize: ${JSON.stringify(setup)}`);
+  }
+  if (!setup.hasAgentButton || !setup.agentPanelOpen || !setup.agentEmptyReady || !setup.agentStopHidden || !setup.semanticIndexReady || !setup.embeddingConfigReady || !setup.profileModalReady || !setup.profileModalClosed || !setup.embeddingToggleReady) {
+    throw new Error(`Agent UI did not initialize: ${JSON.stringify(setup)}`);
+  }
+  if (!setup.keywordAdded || !setup.keywordDeleted || !setup.sidebarKeywordDeleted || !setup.keywordCleanupReady) {
+    throw new Error(`Keyword editing did not persist correctly: ${JSON.stringify(setup)}`);
+  }
+  if (!setup.pageMapOk || setup.ragPageNumber !== 1 || !setup.ragPassageText.includes("sentence")) {
+    throw new Error(`RAG integration did not initialize: ${JSON.stringify(setup)}`);
+  }
+  if (setup.vectorIndexed !== 4 || setup.vectorStatusIndexed !== 4 || setup.vectorEmbedded !== 3 || setup.vectorReused !== 1 || !setup.vectorMetadataOk || !setup.hybridPassageId || setup.hybridMode !== "hybrid") {
+    throw new Error(`Semantic RAG integration did not initialize: ${JSON.stringify(setup)}`);
+  }
+  if (!setup.multimodalEmbeddingOk || setup.multimodalVectorCount !== 2 || multimodalEmbeddingRequestCount !== 2) {
+    throw new Error(`Volcengine multimodal Embedding IPC did not initialize: ${JSON.stringify(setup)}`);
+  }
+  if (!embeddingBatchRejectionCount || !embeddingSingleFailureCount || embeddingRequestCount < 5) {
+    throw new Error("Embedding indexing did not reduce rejected batches and retry temporary failures.");
   }
   await waitForReader(client);
 
@@ -293,8 +490,34 @@ async function main() {
   if (!persistedAnchor || !jumpResult.jumpLabel.includes("第 1 页") || jumpResult.selectedId !== "pdf-reader-smoke-paper" || jumpResult.detailTab !== "source" || !jumpResult.corpusClosed) {
     throw new Error(`PDF persistence/jump smoke test failed: ${JSON.stringify({ persistedAnchor, jumpResult })}`);
   }
+  if (screenshotDir) {
+    fs.mkdirSync(screenshotDir, { recursive: true });
+    await client.send("Page.enable");
+    await evaluate(client, `document.querySelector("#openDeepPaperAgentBtn")?.click()`);
+    await wait(150);
+    const agentShot = await client.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
+    fs.writeFileSync(path.join(screenshotDir, "agent-panel.png"), agentShot.data, "base64");
+    await evaluate(client, `(() => {
+      document.querySelector("#agentCloseBtn")?.click();
+      state.configOpen = true;
+      applyConfigPanel();
+      document.querySelector("#editApiProfileBtn")?.click();
+      document.querySelector(".embedding-config-details").open = true;
+      const embeddingToggle = document.querySelector("#apiProfileEmbeddingEnabled");
+      embeddingToggle.checked = true;
+      embeddingToggle.dispatchEvent(new Event("change", { bubbles: true }));
+    })()`);
+    await wait(150);
+    const configShot = await client.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
+    fs.writeFileSync(path.join(screenshotDir, "embedding-config.png"), configShot.data, "base64");
+    await client.send("Emulation.setDeviceMetricsOverride", { width: 600, height: 800, deviceScaleFactor: 1, mobile: false });
+    await wait(100);
+    const mobileConfigShot = await client.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
+    fs.writeFileSync(path.join(screenshotDir, "embedding-config-mobile.png"), mobileConfigShot.data, "base64");
+    await client.send("Emulation.clearDeviceMetricsOverride");
+  }
   console.log(`PDF reader smoke test passed: page ${result.pageNumber}, ${result.rectCount} anchor rect(s), persistence and source jump verified.`);
-  await client.send("Browser.close");
+  await Promise.race([client.send("Browser.close"), wait(1000)]);
 }
 
 main()
@@ -305,6 +528,7 @@ main()
   .finally(async () => {
     try {
       socket?.close();
+      embeddingServer?.close();
       if (electronProcess && !electronProcess.killed) electronProcess.kill();
       await wait(500);
       if (path.resolve(testRoot).startsWith(path.resolve(os.tmpdir()))) {

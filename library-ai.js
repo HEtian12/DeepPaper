@@ -220,12 +220,23 @@
     };
   }
 
+  function toLocalMatch(candidate) {
+    return {
+      paperId: candidate.id,
+      relevance: candidate.matchedTerms.length ? "中" : "低",
+      reason: candidate.matchedTerms.length
+        ? `本地检索命中：${candidate.matchedTerms.join("、")}；主要命中字段：${candidate.matchedFields.join("、") || "全文"}。`
+        : "本地召回的已解析候选，需结合论文内容进一步判断。"
+    };
+  }
+
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
       extractLibraryAiTerms,
       buildLibraryCandidate,
       retrieveLibraryCandidates,
-      toApiCandidate
+      toApiCandidate,
+      toLocalMatch
     };
     return;
   }
@@ -345,6 +356,16 @@
       input.focus();
       return;
     }
+    const matchToggle = event.target.closest("[data-library-ai-toggle-matches]");
+    if (matchToggle) {
+      const message = panelState.messages.find((item) => item.id === matchToggle.dataset.libraryAiToggleMatches);
+      if (message) {
+        message.showAllMatches = !message.showAllMatches;
+        savePanelState();
+        renderMessages();
+      }
+      return;
+    }
     const paperButton = event.target.closest("[data-library-ai-paper]");
     if (paperButton) openPaperFromResult(paperButton.dataset.libraryAiPaper);
   }
@@ -371,7 +392,10 @@
     if (message.role === "user") {
       return `<article class="library-ai-message user"><span>我</span><p>${html(message.content)}</p></article>`;
     }
-    const resultRows = (message.matches || []).map((match) => {
+    const aiMatches = Array.isArray(message.matches) ? message.matches : [];
+    const localMatches = Array.isArray(message.localMatches) ? message.localMatches : [];
+    const visibleMatches = message.showAllMatches && localMatches.length ? localMatches : aiMatches;
+    const resultRows = visibleMatches.map((match) => {
       const paper = typeof papers !== "undefined" ? papers.find((item) => item.id === match.paperId) : null;
       if (!paper) return "";
       const title = typeof displayTitle === "function"
@@ -391,13 +415,16 @@
         </div>
       `;
     }).join("");
+    const matchToggle = localMatches.length > aiMatches.length
+      ? `<button class="secondary small-btn library-ai-match-toggle" type="button" data-library-ai-toggle-matches="${html(message.id)}">${message.showAllMatches ? `收起，仅看 AI 精选（${aiMatches.length}）` : `查看全部本地匹配（${localMatches.length}）`}</button>`
+      : "";
     const followUps = (message.followUps || []).length
       ? `<div class="library-ai-follow-ups">${message.followUps.map((item) => `
           <button type="button" data-library-ai-follow-up="${html(item)}">${html(item)}</button>
         `).join("")}</div>`
       : "";
     const scanInfo = message.candidateCount
-      ? `<div class="library-ai-scan-info">本地扫描 ${message.libraryCount || 0} 篇，交给 AI 判断 ${message.candidateCount} 篇候选</div>`
+      ? `<div class="library-ai-scan-info">本地扫描 ${message.libraryCount || 0} 篇，匹配 ${message.localMatchCount ?? localMatches.length} 篇，交给 AI 判断前 ${message.candidateCount} 篇候选</div>`
       : "";
     return `
       <article class="library-ai-message assistant ${message.error ? "error" : ""}">
@@ -406,6 +433,7 @@
           <p>${html(message.content || "")}</p>
           ${scanInfo}
           ${resultRows ? `<div class="library-ai-results">${resultRows}</div>` : ""}
+          ${matchToggle}
           ${followUps}
         </div>
       </article>
@@ -424,7 +452,8 @@
       return;
     }
     const config = typeof currentConfig === "function" ? currentConfig() : {};
-    const candidates = retrieveLibraryCandidates(library, message, MAX_CANDIDATES);
+    const allLocalCandidates = retrieveLibraryCandidates(library, message, library.length);
+    const candidates = allLocalCandidates.slice(0, MAX_CANDIDATES);
     const userMessage = {
       id: crypto.randomUUID(),
       role: "user",
@@ -458,13 +487,8 @@
       response = { ok: false, error: error.message };
     }
 
-    const localMatches = candidates.slice(0, 8).map((candidate) => ({
-      paperId: candidate.id,
-      relevance: candidate.matchedTerms.length ? "中" : "低",
-      reason: candidate.matchedTerms.length
-        ? `本地检索命中：${candidate.matchedTerms.join("、")}；主要命中字段：${candidate.matchedFields.join("、") || "全文"}。`
-        : "本地召回的已解析候选，需结合论文内容进一步判断。"
-    }));
+    const localMatches = allLocalCandidates.map(toLocalMatch);
+    const fallbackMatches = localMatches.slice(0, 10);
     const provider = typeof providerDisplayName === "function"
       ? providerDisplayName(config.provider)
       : config.provider === "doubao" ? "豆包/火山方舟" : "DeepSeek";
@@ -472,13 +496,16 @@
     if (response?.ok) {
       const aiMatches = Array.isArray(response.result?.matches) && response.result.matches.length
         ? response.result.matches
-        : localMatches;
+        : fallbackMatches;
       panelState.messages.push({
         id: crypto.randomUUID(),
         role: "assistant",
         provider,
         content: response.result?.answer || "已完成全库检索。",
         matches: aiMatches,
+        localMatches,
+        localMatchCount: localMatches.length,
+        showAllMatches: false,
         followUps: response.result?.followUps || [],
         candidateCount: candidates.length,
         libraryCount: library.length,
@@ -491,7 +518,10 @@
         role: "assistant",
         provider: "本地检索",
         content: `AI 综合判断失败：${response?.error || "未知错误"}。下面先显示本地召回结果。`,
-        matches: localMatches,
+        matches: fallbackMatches,
+        localMatches,
+        localMatchCount: localMatches.length,
+        showAllMatches: false,
         followUps: [],
         candidateCount: candidates.length,
         libraryCount: library.length,
@@ -550,6 +580,8 @@
 
   root.deepPaperLibraryAi = {
     retrieveCandidates: retrieveLibraryCandidates,
+    extractTerms: extractLibraryAiTerms,
+    termAliases,
     open: openPanel,
     exportState,
     importState

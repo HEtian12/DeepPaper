@@ -1,11 +1,18 @@
 {
   "name": "deeppaper-deepseek",
-  "version": "0.1.37",
-  "description": "A standalone DeepSeek-powered literature analysis workspace.",
+  "version": "0.1.48",
+  "private": true,
+  "license": "UNLICENSED",
+  "engines": {
+    "node": "^22.13.0 || >=24.0.0"
+  },
+  "description": "A standalone local literature analysis and research agent workspace.",
   "main": "electron/main.js",
   "scripts": {
     "start": "electron .",
-    "check": "node --check electron/main.js && node --check electron/preload.js && node --check app.js && node --check pdf-reader.js && node --check library-ai.js && node scripts/check-pdf-reader.js && node scripts/check-library-ai.js",
+    "test": "npm run check",
+    "test:e2e": "npm run smoke:pdf-reader",
+    "check": "node --check electron/main.js && node --check electron/preload.js && node --check app.js && node --check pdf-reader.js && node --check library-ai.js && node --check rag.js && node --check vector-store.js && node --check agent.js && node scripts/check-pdf-reader.js && node scripts/check-library-ai.js && node scripts/check-rag.js && node scripts/check-vector-store.js && node scripts/check-agent.js",
     "smoke:pdf-reader": "node scripts/smoke-pdf-reader.e2e.js",
     "dist": "electron-builder --win portable"
   },
@@ -27,8 +34,12 @@
       "app.js",
       "pdf-reader.js",
       "library-ai.js",
+      "rag.js",
+      "vector-store.js",
+      "agent.js",
       "electron/**/*",
       "node_modules/**/*",
+      "LICENSE",
       "package.json"
     ],
     "win": {

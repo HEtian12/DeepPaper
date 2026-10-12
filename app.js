@@ -414,6 +414,7 @@ async function importPdfFiles(filePaths) {
       fileSize: result.fileSize,
       pageCount: result.pageCount,
       text: result.text,
+      pageTextOffsets: result.pageTextOffsets,
       title: existing?.title || guessTitleFromText(result.text) || cleanTitleFromFile(result.fileName),
       status: existing?.status || "待解析",
       chat: existing?.chat || paper.chat || [],
@@ -504,6 +505,7 @@ async function importLibraryFile() {
     corpus = Array.isArray(data.corpus) ? data.corpus.map(normalizeCorpusItem) : [];
     collections = Array.isArray(data.collections) ? data.collections.map(normalizeCollection) : [];
     window.deepPaperLibraryAi?.importState?.(data.libraryAi);
+    window.deepPaperAgent?.importState?.(data.agent);
     state.selectedId = papers[0]?.id || null;
     state.batchSelectedIds.clear();
     state.activeCollectionId = null;
@@ -526,7 +528,8 @@ async function exportLibraryFile() {
     papers,
     corpus,
     collections,
-    libraryAi: window.deepPaperLibraryAi?.exportState?.() || null
+    libraryAi: window.deepPaperLibraryAi?.exportState?.() || null,
+    agent: window.deepPaperAgent?.exportState?.() || null
   };
   const result = await window.deepPaper.exportLibrary(payload);
   if (!result.ok) {
@@ -993,7 +996,7 @@ function addPaperKeyword(id, value) {
   if (!paper) return;
   const keywords = parseKeywords(value);
   if (!keywords.length) return;
-  paper.keywords = mergeKeywords(paper.keywords, keywords);
+  paper.keywords = mergeKeywords(paperKeywords(paper), keywords);
   syncAnalysisKeywords(paper);
   saveLibrary();
   setStatus(`关键词已更新：${paper.keywords.length} 个`);
@@ -1002,8 +1005,10 @@ function addPaperKeyword(id, value) {
 
 function removePaperKeyword(id, index) {
   const paper = papers.find((item) => item.id === id);
-  if (!paper || !Array.isArray(paper.keywords)) return;
-  paper.keywords.splice(index, 1);
+  if (!paper) return;
+  const keywords = paperKeywords(paper);
+  if (index < 0 || index >= keywords.length) return;
+  paper.keywords = keywords.filter((item, itemIndex) => itemIndex !== index);
   syncAnalysisKeywords(paper);
   saveLibrary();
   setStatus(`关键词已更新：${paper.keywords.length} 个`);
@@ -1752,7 +1757,8 @@ async function exportLibraryFile() {
     papers,
     corpus,
     collections,
-    libraryAi: window.deepPaperLibraryAi?.exportState?.() || null
+    libraryAi: window.deepPaperLibraryAi?.exportState?.() || null,
+    agent: window.deepPaperAgent?.exportState?.() || null
   };
   const result = await window.deepPaper.exportLibrary(payload);
   if (!result.ok) {
@@ -2946,29 +2952,55 @@ function cleanKeywordTerm(value) {
     .trim();
   if (!text) return "";
 
-  text = text.replace(/^[\s"'“”‘’`[\]【】()（）]+|[\s"'“”‘’`[\]【】()（）。.,，;；:：]+$/g, "");
+  text = text
+    .replace(/^(?:关键词|关键字|keywords?)\s*[:：]\s*/i, "")
+    .replace(/^\s*(?:[（(]?\d{1,2}[)）]?\s*[.．、:：]\s*)+/, "")
+    .replace(/^[\s"'“”‘’`[\]【】()（）]+|[\s"'“”‘’`[\]【】()（）。.,，;；:：]+$/g, "");
 
   const colonIndex = text.search(/[：:]/);
   if (colonIndex > 0) text = text.slice(0, colonIndex).trim();
 
-  text = text.replace(/\s*\(([^)]{3,80})\)\s*/g, (match, inner, offset) => {
-    const before = text.slice(0, offset).trim();
-    return before && before.length <= 24 ? "" : match;
-  }).trim();
-
   const sentenceBreak = text.search(/[。！？!?；;]/);
   if (sentenceBreak > 0) text = text.slice(0, sentenceBreak).trim();
 
-  return text.replace(/^[\s"'“”‘’`[\]【】()（）]+|[\s"'“”‘’`[\]【】()（）。.,，;；:：]+$/g, "").trim();
+  text = text
+    .replace(/^L?([12])\s*正则化$/i, (_, order) => `L${order} 正则化`)
+    .replace(/^SoftMax(?=损失|\s|$)/i, "Softmax")
+    .replace(/^(Softmax|SoftTriple)\s*损失$/i, "$1 损失")
+    .replace(/[\(（\[【]\s*$/, "")
+    .trim();
+
+  const closingByOpening = { "(": ")", "（": "）", "[": "]", "【": "】" };
+  const openingByClosing = { ")": "(", "）": "（", "]": "[", "】": "【" };
+  const stack = [];
+  let balanced = "";
+  for (const char of text) {
+    if (closingByOpening[char]) {
+      stack.push(char);
+      balanced += char;
+      continue;
+    }
+    if (openingByClosing[char]) {
+      if (stack.at(-1) === openingByClosing[char]) {
+        stack.pop();
+        balanced += char;
+      }
+      continue;
+    }
+    balanced += char;
+  }
+  while (stack.length) balanced += closingByOpening[stack.pop()];
+
+  return balanced.replace(/^[\s"'“”‘’`[\]【】()（）]+|[\s"'“”‘’`。.,，;；:：]+$/g, "").trim();
 }
 
 function isKeywordLike(value) {
   const text = String(value || "").trim();
   if (!text) return false;
-  if (text.length > 36) return false;
+  if (text.length > 28) return false;
   if ((text.match(/\s+/g) || []).length > 6) return false;
   if (/[。！？!?；;\n\r]/.test(text)) return false;
-  if (/(通过|利用|采用|提出|引入|结合|从而|用于|进行|包含|包括|解决|提升|降低|适应|导致|可以|实现|本文|该方法)/.test(text) && text.length > 14) return false;
+  if (/(通过|利用|采用|提出|引入|结合|从而|用于|进行|包含|包括|解决|提升|降低|适应|导致|可以|实现|本文|该方法)/.test(text) && text.length >= 12) return false;
   return true;
 }
 
@@ -2981,6 +3013,7 @@ function parseKeywords(value) {
       .flatMap((item) => String(item || "").split(/[\n\r,，、;；|/]+/))
       .map(cleanKeywordTerm)
       .filter(isKeywordLike)
+      .filter((item) => !isEnglishPhraseKeyword(item))
   );
 }
 
@@ -2991,18 +3024,23 @@ function mergeKeywords(...groups) {
 function paperKeywords(paper) {
   const analysis = paper?.analysis || {};
   const method = analysis.method || {};
-  return uniqueTextItems([
-    ...parseKeywords(paper?.keywords || []),
+  if (Array.isArray(paper?.keywords)) return parseKeywords(paper.keywords);
+
+  const analysisKeywords = uniqueTextItems([
     ...parseKeywords(analysis.keywords || []),
     ...parseKeywords(analysis.keyword || []),
     ...parseKeywords(analysis.key_words || []),
-    ...parseKeywords(analysis.tags || []),
+    ...parseKeywords(analysis.tags || [])
+  ]);
+  if (analysisKeywords.length) return analysisKeywords;
+
+  return uniqueTextItems([
     ...parseKeywords(analysis.task || []),
     ...parseKeywords(analysis.domain || []),
     ...parseKeywords(analysis.modality || []),
     ...parseKeywords(method.method_name || []),
     ...parseKeywords(method.modules || [])
-  ]).slice(0, 12);
+  ]);
 }
 
 function syncDerivedKeywords(paper) {
@@ -3055,6 +3093,18 @@ function editGlobalKeyword(oldKeyword) {
   render();
 }
 
+function deleteGlobalKeyword(keyword) {
+  const current = String(keyword || "").trim();
+  if (!current || !confirm(`确认从所有论文中删除关键词“${current}”？`)) return;
+  papers.forEach((paper) => {
+    paper.keywords = replaceKeywordInList(paperKeywords(paper), current, "");
+    syncAnalysisKeywords(paper);
+  });
+  saveLibrary();
+  setStatus(`已删除关键词“${current}”。`);
+  render();
+}
+
 function addKeywordToSelectedPaper() {
   const paper = papers.find((item) => item.id === state.selectedId);
   if (!paper) {
@@ -3084,14 +3134,14 @@ function renderKeywords() {
     const button = document.createElement("button");
     button.className = `chip keyword-sidebar-chip ${activeTerms.includes(keyword.toLowerCase()) ? "active" : ""}`;
     button.textContent = keyword;
-    button.title = "左键加入关键词检索；右键编辑或删除";
+    button.title = "左键加入关键词检索；右键从所有论文中删除";
     button.addEventListener("click", () => {
       toggleKeywordTerm(keyword);
       render();
     });
     button.addEventListener("contextmenu", (event) => {
       event.preventDefault();
-      editGlobalKeyword(keyword);
+      deleteGlobalKeyword(keyword);
     });
     els.keywordList.appendChild(button);
   });
@@ -3185,6 +3235,10 @@ function currentConfig() {
     provider: profile?.provider || els.providerSelect.value,
     apiKey: profile?.apiKey || els.apiKeyInput.value.trim(),
     model: profile?.model || els.modelSelect.value,
+    embeddingEnabled: Boolean(profile?.embeddingEnabled),
+    embeddingBaseUrl: profile?.embeddingBaseUrl || "",
+    embeddingApiKey: profile?.embeddingApiKey || "",
+    embeddingModel: profile?.embeddingModel || "",
     apiProfiles: state.apiProfiles || [],
     activeApiProfileId: state.activeApiProfileId || "",
     globalLanguage: state.globalLanguage,
@@ -3202,7 +3256,11 @@ function normalizeApiProfiles(config) {
       name: String(profile.name || "").trim() || defaultProfileName(profile.provider, profile.model),
       provider: profile.provider === "doubao" ? "doubao" : "deepseek",
       apiKey: String(profile.apiKey || ""),
-      model: String(profile.model || "")
+      model: String(profile.model || ""),
+      embeddingEnabled: Boolean(profile.embeddingEnabled),
+      embeddingBaseUrl: String(profile.embeddingBaseUrl || ""),
+      embeddingApiKey: String(profile.embeddingApiKey || ""),
+      embeddingModel: String(profile.embeddingModel || "")
     }))
     .filter((profile) => profile.model || profile.apiKey);
 
@@ -3214,7 +3272,11 @@ function normalizeApiProfiles(config) {
     name: defaultProfileName(provider, config.model),
     provider,
     apiKey: String(config.apiKey || ""),
-    model: String(config.model || (provider === "doubao" ? "" : "deepseek-chat"))
+    model: String(config.model || (provider === "doubao" ? "" : "deepseek-chat")),
+    embeddingEnabled: false,
+    embeddingBaseUrl: "",
+    embeddingApiKey: "",
+    embeddingModel: ""
   }];
 }
 
@@ -3242,31 +3304,100 @@ function ensureApiProfileUi() {
   box.id = "apiProfileBox";
   box.className = "api-profile-box";
   box.innerHTML = `
-    <label>接口</label>
-    <select id="apiProfileSelect"></select>
+    <div class="settings-section-head">
+      <div>
+        <span>模型服务</span>
+        <strong>当前接口</strong>
+      </div>
+      <span id="apiProfileCount" class="settings-count"></span>
+    </div>
+    <select id="apiProfileSelect" aria-label="当前 AI 接口"></select>
     <div class="button-row api-profile-actions">
-      <button id="newApiProfileBtn" class="secondary" type="button">新增接口</button>
+      <button id="newApiProfileBtn" class="secondary" type="button">＋ 新建</button>
       <button id="editApiProfileBtn" class="secondary" type="button">编辑</button>
     </div>
-    <section id="apiProfileEditor" class="api-profile-editor hidden">
-      <label>名称</label>
-      <input id="apiProfileNameInput" type="text" placeholder="如：豆包视觉 / DeepSeek Pro" />
-      <label>服务商</label>
-      <select id="apiProfileProviderInput">
-        <option value="deepseek">DeepSeek</option>
-        <option value="doubao">豆包 / 火山方舟</option>
-      </select>
-      <label>API Key</label>
-      <input id="apiProfileKeyInput" type="password" placeholder="sk-... / 火山方舟 API Key" />
-      <label>模型 / Endpoint</label>
-      <input id="apiProfileModelInput" type="text" placeholder="deepseek-v4-pro 或 ep-..." />
-      <div class="button-row">
-        <button id="saveApiProfileBtn" class="secondary" type="button">保存接口</button>
-        <button id="deleteApiProfileBtn" class="secondary danger" type="button">删除</button>
-      </div>
-    </section>
   `;
   els.configPanel.insertBefore(box, els.configPanel.querySelector(".library-actions")?.nextSibling || els.configPanel.firstChild);
+
+  const modal = document.createElement("div");
+  modal.id = "apiProfileModal";
+  modal.className = "api-profile-modal hidden";
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  modal.setAttribute("aria-labelledby", "apiProfileEditorTitle");
+  modal.innerHTML = `
+    <section class="api-profile-dialog">
+      <header class="api-profile-dialog-head">
+        <div>
+          <h2 id="apiProfileEditorTitle">编辑接口</h2>
+          <p>配置模型服务；保存后可在侧栏直接切换。</p>
+        </div>
+        <button id="closeApiProfileEditorBtn" class="icon-button" type="button" aria-label="关闭接口配置" title="关闭">×</button>
+      </header>
+      <section id="apiProfileEditor" class="api-profile-editor">
+        <div class="api-profile-form-grid">
+          <div class="api-profile-field">
+            <label for="apiProfileNameInput">接口名称 <span>可选</span></label>
+            <input id="apiProfileNameInput" type="text" placeholder="留空则自动生成" />
+          </div>
+          <div class="api-profile-field">
+            <label for="apiProfileProviderInput">服务商</label>
+            <select id="apiProfileProviderInput">
+              <option value="deepseek">DeepSeek</option>
+              <option value="doubao">豆包 / 火山方舟</option>
+            </select>
+          </div>
+          <div class="api-profile-field api-profile-field-wide">
+            <label for="apiProfileKeyInput">API Key</label>
+            <input id="apiProfileKeyInput" type="password" autocomplete="off" placeholder="输入模型服务商提供的 API Key" />
+          </div>
+          <div class="api-profile-field api-profile-field-wide">
+            <label for="apiProfileModelInput">模型 / Endpoint</label>
+            <input id="apiProfileModelInput" type="text" placeholder="如 deepseek-v4-pro 或 ep-..." />
+          </div>
+        </div>
+        <details class="embedding-config-details">
+          <summary>
+            <span>
+              <strong>语义检索</strong>
+              <small>Embedding，可选</small>
+            </span>
+            <i id="embeddingStatusText">未启用</i>
+          </summary>
+          <label class="embedding-enable-row" for="apiProfileEmbeddingEnabled">
+            <span>
+              <strong>启用混合检索</strong>
+              <small>关键词检索与向量检索共同召回文献段落</small>
+            </span>
+            <input id="apiProfileEmbeddingEnabled" type="checkbox" />
+          </label>
+          <div id="embeddingFields" class="embedding-fields hidden">
+            <div class="api-profile-field">
+              <label for="apiProfileEmbeddingBaseUrl">Embedding API 地址</label>
+              <input id="apiProfileEmbeddingBaseUrl" type="url" placeholder="https://.../api/v3" />
+            </div>
+            <div class="api-profile-field">
+              <label for="apiProfileEmbeddingKeyInput">Embedding API Key <span>可复用上方 Key</span></label>
+              <input id="apiProfileEmbeddingKeyInput" type="password" autocomplete="off" placeholder="留空则复用模型 API Key" />
+            </div>
+            <div class="api-profile-field">
+              <label for="apiProfileEmbeddingModelInput">Embedding 模型 / Endpoint</label>
+              <input id="apiProfileEmbeddingModelInput" type="text" placeholder="如 doubao-embedding-vision-250615" />
+            </div>
+            <p class="field-hint">保存后，在文献 Agent 中点击“更新语义索引”。</p>
+          </div>
+        </details>
+      </section>
+      <footer class="api-profile-dialog-actions">
+        <button id="deleteApiProfileBtn" class="secondary danger" type="button">删除接口</button>
+        <div>
+          <button id="cancelApiProfileEditorBtn" class="secondary" type="button">取消</button>
+          <button id="saveApiProfileBtn" class="primary" type="button">保存接口</button>
+        </div>
+      </footer>
+    </section>
+  `;
+  document.body.appendChild(modal);
   hideLegacyApiConfigControls();
   bindApiProfileUi();
 }
@@ -3297,6 +3428,18 @@ function bindApiProfileUi() {
   document.querySelector("#editApiProfileBtn").addEventListener("click", () => openApiProfileEditor(getActiveApiProfile()));
   document.querySelector("#saveApiProfileBtn").addEventListener("click", saveApiProfileFromEditor);
   document.querySelector("#deleteApiProfileBtn").addEventListener("click", deleteActiveApiProfile);
+  document.querySelector("#closeApiProfileEditorBtn").addEventListener("click", closeApiProfileEditor);
+  document.querySelector("#cancelApiProfileEditorBtn").addEventListener("click", closeApiProfileEditor);
+  document.querySelector("#apiProfileEmbeddingEnabled").addEventListener("change", updateEmbeddingEditorState);
+  document.querySelector("#apiProfileProviderInput").addEventListener("change", updateEmbeddingProviderDefaults);
+  document.querySelector("#apiProfileModal").addEventListener("mousedown", (event) => {
+    if (event.target === event.currentTarget) closeApiProfileEditor();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !document.querySelector("#apiProfileModal")?.classList.contains("hidden")) {
+      closeApiProfileEditor();
+    }
+  });
 }
 
 function renderApiProfileUi() {
@@ -3308,17 +3451,50 @@ function renderApiProfileUi() {
     </option>
   `).join("");
   document.querySelector("#editApiProfileBtn").disabled = !(state.apiProfiles || []).length;
+  const count = (state.apiProfiles || []).length;
+  document.querySelector("#apiProfileCount").textContent = `${count} 个`;
 }
 
 function openApiProfileEditor(profile) {
+  const modal = document.querySelector("#apiProfileModal");
   const editor = document.querySelector("#apiProfileEditor");
-  editor.classList.remove("hidden");
   editor.dataset.editingProfileId = profile?.id || "";
+  document.querySelector("#apiProfileEditorTitle").textContent = profile ? "编辑接口" : "新建接口";
   document.querySelector("#apiProfileNameInput").value = profile?.name || "";
   document.querySelector("#apiProfileProviderInput").value = profile?.provider || "deepseek";
   document.querySelector("#apiProfileKeyInput").value = profile?.apiKey || "";
   document.querySelector("#apiProfileModelInput").value = profile?.model || "";
+  document.querySelector("#apiProfileEmbeddingEnabled").checked = Boolean(profile?.embeddingEnabled);
+  document.querySelector("#apiProfileEmbeddingBaseUrl").value = profile?.embeddingBaseUrl || (profile?.provider === "doubao" ? "https://ark.cn-beijing.volces.com/api/v3" : "");
+  document.querySelector("#apiProfileEmbeddingKeyInput").value = profile?.embeddingApiKey || "";
+  document.querySelector("#apiProfileEmbeddingModelInput").value = profile?.embeddingModel || "";
+  document.querySelector(".embedding-config-details").open = Boolean(profile?.embeddingEnabled);
+  document.querySelector("#deleteApiProfileBtn").classList.toggle("hidden", !profile);
+  updateEmbeddingEditorState();
+  modal.classList.remove("hidden");
   document.querySelector("#apiProfileNameInput").focus();
+}
+
+function closeApiProfileEditor() {
+  document.querySelector("#apiProfileModal")?.classList.add("hidden");
+}
+
+function updateEmbeddingEditorState() {
+  const enabled = document.querySelector("#apiProfileEmbeddingEnabled")?.checked;
+  document.querySelector("#embeddingFields")?.classList.toggle("hidden", !enabled);
+  const status = document.querySelector("#embeddingStatusText");
+  if (status) {
+    status.textContent = enabled ? "已启用" : "未启用";
+    status.classList.toggle("active", Boolean(enabled));
+  }
+}
+
+function updateEmbeddingProviderDefaults() {
+  const provider = document.querySelector("#apiProfileProviderInput")?.value;
+  const baseUrl = document.querySelector("#apiProfileEmbeddingBaseUrl");
+  if (provider === "doubao" && baseUrl && !baseUrl.value.trim()) {
+    baseUrl.value = "https://ark.cn-beijing.volces.com/api/v3";
+  }
 }
 
 function saveApiProfileFromEditor() {
@@ -3331,14 +3507,22 @@ function saveApiProfileFromEditor() {
     name: document.querySelector("#apiProfileNameInput").value.trim() || defaultProfileName(provider, model),
     provider,
     apiKey: document.querySelector("#apiProfileKeyInput").value.trim(),
-    model
+    model,
+    embeddingEnabled: document.querySelector("#apiProfileEmbeddingEnabled").checked,
+    embeddingBaseUrl: document.querySelector("#apiProfileEmbeddingBaseUrl").value.trim(),
+    embeddingApiKey: document.querySelector("#apiProfileEmbeddingKeyInput").value.trim(),
+    embeddingModel: document.querySelector("#apiProfileEmbeddingModelInput").value.trim()
   };
+  if (profile.embeddingEnabled && (!profile.embeddingBaseUrl || !profile.embeddingModel || !(profile.embeddingApiKey || profile.apiKey))) {
+    setStatus("Embedding 配置不完整：请填写 API 地址、模型，并提供可用的 API Key。", true);
+    return;
+  }
   const index = (state.apiProfiles || []).findIndex((item) => item.id === id);
   if (index >= 0) state.apiProfiles[index] = profile;
   else state.apiProfiles = [...(state.apiProfiles || []), profile];
   state.activeApiProfileId = profile.id;
   applyActiveApiProfile();
-  editor.classList.add("hidden");
+  closeApiProfileEditor();
   saveConfig(currentConfig());
   renderApiProfileUi();
   setStatus(`接口已保存：${profile.name}`);
@@ -3355,7 +3539,7 @@ function deleteActiveApiProfile() {
   state.apiProfiles = state.apiProfiles.filter((item) => item.id !== profile.id);
   state.activeApiProfileId = state.apiProfiles[0]?.id || "";
   applyActiveApiProfile();
-  document.querySelector("#apiProfileEditor").classList.add("hidden");
+  closeApiProfileEditor();
   saveConfig(currentConfig());
   renderApiProfileUi();
 }
@@ -3430,7 +3614,8 @@ async function exportLibraryFile() {
     papers,
     corpus,
     collections,
-    libraryAi: window.deepPaperLibraryAi?.exportState?.() || null
+    libraryAi: window.deepPaperLibraryAi?.exportState?.() || null,
+    agent: window.deepPaperAgent?.exportState?.() || null
   };
   const result = await window.deepPaper.exportLibrary(payload);
   if (!result.ok) {
@@ -3778,3 +3963,4 @@ function renderDetailWithSourceQuote(paper) {
 
 renderSourcePreview = renderSourcePreviewWithQuoteTool;
 renderDetail = renderDetailWithSourceQuote;
+window.deepPaperRefresh = render;

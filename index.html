@@ -21,6 +21,7 @@
         </header>
 
         <section id="configPanel" class="panel config-panel collapsed">
+          <div class="config-section-label">文献库</div>
           <div class="library-actions">
             <button id="importLibraryBtn" class="secondary">导入库</button>
             <button id="exportLibraryBtn" class="secondary">导出库</button>
@@ -50,7 +51,7 @@
           </div>
           <div id="balanceInfo" class="balance-info">未查询余额</div>
 
-          <label>界面风格</label>
+          <label class="config-theme-label">外观</label>
           <select id="themeSelect">
             <option value="standard">标准浅色</option>
             <option value="ink">墨绿风格</option>
@@ -175,5 +176,8 @@
     <script src="./app.js"></script>
     <script src="./pdf-reader.js"></script>
     <script src="./library-ai.js"></script>
+    <script src="./rag.js"></script>
+    <script src="./vector-store.js"></script>
+    <script src="./agent.js"></script>
   </body>
 </html>

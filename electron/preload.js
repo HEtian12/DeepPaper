@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld("deepPaper", {
   choosePdf: () => ipcRenderer.invoke("papers:choosePdf"),
   chooseImage: () => ipcRenderer.invoke("papers:chooseImage"),
   extractPdf: (filePath) => ipcRenderer.invoke("papers:extractPdf", filePath),
+  extractPdfPages: (filePath) => ipcRenderer.invoke("papers:extractPdfPages", filePath),
   extractImage: (filePath) => ipcRenderer.invoke("papers:extractImage", filePath),
   openPdf: (filePath) => ipcRenderer.invoke("papers:openFile", filePath),
   openExistingFile: (filePath) => ipcRenderer.invoke("papers:openExistingFile", filePath),
@@ -20,5 +21,8 @@ contextBridge.exposeInMainWorld("deepPaper", {
   analyzeWithDeepSeek: (payload) => ipcRenderer.invoke("deepseek:analyze", payload),
   chatWithDeepSeek: (payload) => ipcRenderer.invoke("deepseek:chat", payload),
   chatWithLibrary: (payload) => ipcRenderer.invoke("library:ai-chat", payload),
+  runAgentStep: (payload) => ipcRenderer.invoke("agent:step", payload),
+  verifyAgentAnswer: (payload) => ipcRenderer.invoke("agent:verify", payload),
+  createEmbeddings: (payload) => ipcRenderer.invoke("embeddings:create", payload),
   getDeepSeekBalance: (apiKey) => ipcRenderer.invoke("deepseek:balance", apiKey)
 });

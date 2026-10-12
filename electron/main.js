@@ -4,7 +4,8 @@ const fs = require("node:fs/promises");
 const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
-const pdfParse = require("pdf-parse");
+
+let pdfJsModulePromise = null;
 
 const API_BASES = {
   deepseek: "https://api.deepseek.com",
@@ -61,7 +62,7 @@ ipcMain.handle("papers:chooseImage", async () => {
 ipcMain.handle("papers:extractPdf", async (_event, filePath) => {
   try {
     const buffer = await fs.readFile(filePath);
-    const parsed = await pdfParse(buffer);
+    const parsed = await extractPdfTextWithPages(buffer);
     return {
       ok: true,
       kind: "pdf",
@@ -69,11 +70,26 @@ ipcMain.handle("papers:extractPdf", async (_event, filePath) => {
       fileName: path.basename(filePath),
       fileHash: crypto.createHash("sha256").update(buffer).digest("hex"),
       fileSize: buffer.length,
-      pageCount: parsed.numpages || 0,
-      text: normalizePaperText(parsed.text || "")
+      pageCount: parsed.pageCount,
+      text: parsed.text,
+      pageTextOffsets: parsed.pageTextOffsets
     };
   } catch (error) {
     return { ok: false, filePath, error: error.message };
+  }
+});
+
+ipcMain.handle("papers:extractPdfPages", async (_event, filePath) => {
+  if (!filePath || path.extname(filePath).toLowerCase() !== ".pdf") {
+    return { ok: false, error: "没有可建立段落索引的 PDF 文件。" };
+  }
+  try {
+    if (!(await pathExists(filePath))) return { ok: false, missing: true, error: `文件不存在：${filePath}` };
+    const buffer = await fs.readFile(filePath);
+    const parsed = await extractPdfTextWithPages(buffer);
+    return { ok: true, ...parsed };
+  } catch (error) {
+    return { ok: false, error: error.message };
   }
 });
 
@@ -434,6 +450,222 @@ ipcMain.handle("library:ai-chat", async (_event, payload) => {
   };
 });
 
+ipcMain.handle("embeddings:create", async (_event, payload) => {
+  const { embeddingBaseUrl, embeddingApiKey, apiKey, embeddingModel, input } = payload || {};
+  const key = String(embeddingApiKey || apiKey || "").trim();
+  const model = String(embeddingModel || "").trim();
+  const values = (Array.isArray(input) ? input : [input])
+    .map((item) => String(item || "").trim().slice(0, 8000))
+    .filter(Boolean)
+    .slice(0, 32);
+  if (!key || !model || !embeddingBaseUrl) return { ok: false, error: "Embedding 配置不完整。" };
+  if (!values.length) return { ok: false, error: "没有可向量化的文本。" };
+
+  let endpoint;
+  try {
+    endpoint = normalizeEmbeddingEndpoint(embeddingBaseUrl);
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+
+  if (isMultimodalEmbeddingEndpoint(endpoint)) {
+    const result = await createMultimodalEmbeddingVectors({ endpoint, key, model, values });
+    if (result.ok) return result;
+    return {
+      ...result,
+      error: `${result.error || "Embedding 请求失败。"}\n调用地址：${endpoint}\n模型：${model}`,
+      endpoint,
+      model
+    };
+  }
+
+  let lastError = "";
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const requestInput = values.length === 1 ? values[0] : values;
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+        body: JSON.stringify({ model, input: requestInput, encoding_format: "float" })
+      });
+      const bodyText = await response.text();
+      if (!response.ok) {
+        lastError = `Embedding 请求失败：${response.status} ${bodyText.slice(0, 1200)}`;
+      } else {
+        const data = safeJsonParse(bodyText);
+        const entries = Array.isArray(data?.data) ? [...data.data].sort((a, b) => Number(a.index) - Number(b.index)) : [];
+        const vectors = entries.map((item) => item?.embedding).filter((vector) => Array.isArray(vector) && vector.length);
+        if (vectors.length === values.length) {
+          return { ok: true, vectors, model: data?.model || model, usage: data?.usage || null };
+        }
+        lastError = "Embedding 接口返回了无法识别的向量数据。";
+      }
+    } catch (error) {
+      lastError = `Embedding 请求失败：${error.message}`;
+    }
+    if (attempt < 3 && isRetryableError(lastError)) await sleep(700 * attempt);
+    else break;
+  }
+  return {
+    ok: false,
+    error: `${lastError || "Embedding 请求失败。"}\n调用地址：${endpoint}\n模型：${model}`,
+    endpoint,
+    model
+  };
+});
+
+ipcMain.handle("agent:step", async (_event, payload) => {
+  const { apiKey, provider = "deepseek", model, goal, transcript } = payload || {};
+  if (!apiKey) return { ok: false, error: `请先配置 ${providerLabel(provider)} API Key。` };
+  if (!String(goal || "").trim()) return { ok: false, error: "请输入 Agent 任务。" };
+
+  const safeTranscript = (Array.isArray(transcript) ? transcript : [])
+    .slice(-10)
+    .map((entry) => ({
+      type: entry?.type === "tool_result" ? "tool_result" : "agent_action",
+      tool: clipLibraryAiText(entry?.tool, 80),
+      summary: clipLibraryAiText(entry?.summary, 500),
+      arguments: entry?.arguments && typeof entry.arguments === "object" ? entry.arguments : {},
+      result: clipLibraryAiText(entry?.result, 24000)
+    }));
+
+  const messages = [
+    {
+      role: "system",
+      content: [
+        "你是 DeepPaper 本地文献库 Agent。你要通过调用本地工具完成用户目标，而不是凭空回答。",
+        "每次只能返回一个工具调用，或在证据充分时结束。不要输出思维链，只提供简短的 decision_summary。",
+        "可用工具：",
+        "1. search_library：在全库检索论文。参数 {query:string, limit:number}。任务开始时通常先调用它。",
+        "2. search_passages：从 PDF 正文段落中进行关键词与语义混合检索并重排证据。参数 {query:string, limit:number}。回答论文内容、方法或结果问题时优先调用。",
+        "3. read_passages：读取段落及相邻上下文。参数 {passage_ids:string[]}。需要核实上下文时调用。",
+        "4. read_papers：读取指定论文的结构化解析。参数 {paper_ids:string[], sections:string[]}。sections 可包含 abstract、motivation、method、contributions、results、keywords、metadata。",
+        "5. compare_papers：为多篇论文获取对比材料。参数 {paper_ids:string[], focus:string}。",
+        "6. propose_collection：提出合集写入方案，但必须由用户确认后才执行。参数 {name:string, paper_ids:string[], rationale:string}。",
+        "7. build_evidence_map：读取多篇论文的问题、方法、数据集、结果和局限，构建可比较的证据图谱。参数 {paper_ids:string[]}。研究空白、方法关系和跨论文综合任务应调用。",
+        "规则：只能引用工具结果中真实存在的 paper_id 和 passage_id；证据不足时明确说明；不要虚构论文、页码、原文、结果或排名。",
+        "如果用户要求找论文，至少调用一次 search_library 或 search_passages；如果要求比较或总结，应继续 read_passages、read_papers 或 compare_papers。正文工具返回了 passage_id 时，最终引用优先带 passage_id。",
+        "输出必须是严格 JSON，二选一：",
+        '{"status":"tool","decision_summary":"简短说明下一步","tool":{"name":"search_library|search_passages|read_passages|read_papers|compare_papers|build_evidence_map|propose_collection","arguments":{}}}',
+        '{"status":"final","decision_summary":"简短结论","final":{"answer":"中文回答","citations":[{"paper_id":"真实 id","passage_id":"可选的真实段落 id","reason":"引用理由"}],"follow_ups":["后续问题"]}}'
+      ].join("\n")
+    },
+    {
+      role: "user",
+      content: [
+        `用户目标：${String(goal).trim()}`,
+        `已经执行的步骤：${JSON.stringify(safeTranscript)}`,
+        "请决定下一步。"
+      ].join("\n\n")
+    }
+  ];
+
+  const result = await callChatWithRetry({
+    provider,
+    apiKey,
+    model,
+    temperature: 0.1,
+    responseFormat: { type: "json_object" },
+    messages
+  });
+  if (!result.ok) return result;
+
+  const parsed = parseJsonObject(result.content);
+  if (!parsed.ok || !parsed.value || typeof parsed.value !== "object") {
+    return { ok: false, error: `${providerLabel(provider)} 没有返回合法的 Agent 指令。` };
+  }
+
+  const value = parsed.value;
+  const summary = clipLibraryAiText(value.decision_summary, 500);
+  if (value.status === "tool") {
+    const name = String(value.tool?.name || "");
+    const allowedTools = new Set(["search_library", "search_passages", "read_passages", "read_papers", "compare_papers", "build_evidence_map", "propose_collection"]);
+    if (!allowedTools.has(name)) return { ok: false, error: `Agent 请求了不支持的工具：${name || "空"}` };
+    return {
+      ok: true,
+      step: {
+        status: "tool",
+        decisionSummary: summary,
+        tool: { name, arguments: value.tool?.arguments && typeof value.tool.arguments === "object" ? value.tool.arguments : {} }
+      }
+    };
+  }
+
+  if (value.status !== "final") return { ok: false, error: "Agent 返回了无法识别的状态。" };
+  return {
+    ok: true,
+    step: {
+      status: "final",
+      decisionSummary: summary,
+      final: {
+        answer: clipLibraryAiText(value.final?.answer, 8000),
+        citations: (Array.isArray(value.final?.citations) ? value.final.citations : []).slice(0, 16).map((item) => ({
+          paperId: clipLibraryAiText(item?.paper_id, 100),
+          passageId: clipLibraryAiText(item?.passage_id, 180),
+          reason: clipLibraryAiText(item?.reason, 400)
+        })).filter((item) => item.paperId),
+        followUps: (Array.isArray(value.final?.follow_ups) ? value.final.follow_ups : []).slice(0, 4).map((item) => clipLibraryAiText(item, 180)).filter(Boolean)
+      }
+    }
+  };
+});
+
+ipcMain.handle("agent:verify", async (_event, payload) => {
+  const { apiKey, provider = "deepseek", model, goal, answer, citations } = payload || {};
+  const evidence = (Array.isArray(citations) ? citations : []).slice(0, 16).map((item) => ({
+    passage_id: clipLibraryAiText(item?.passageId, 180),
+    paper_title: clipLibraryAiText(item?.paperTitle, 300),
+    page: Number(item?.pageNumber) || null,
+    quote: clipLibraryAiText(item?.quote, 900),
+    claimed_reason: clipLibraryAiText(item?.reason, 500)
+  })).filter((item) => item.passage_id && item.quote);
+  if (!evidence.length) {
+    return {
+      ok: true,
+      verification: { verdict: "insufficient", score: 0, summary: "回答没有可核验的正文证据。", issues: ["没有有效段落引用。"], supportedPassageIds: [] }
+    };
+  }
+
+  const result = await callChatWithRetry({
+    provider,
+    apiKey,
+    model,
+    temperature: 0,
+    responseFormat: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content: [
+          "你是科研回答证据校验器，只能依据提供的本地论文原文证据进行检查。",
+          "检查回答中的主要结论是否被证据直接支持，是否存在过度推断、张冠李戴或证据缺口。",
+          "不要补充外部知识。输出严格 JSON，不要 Markdown。",
+          'schema: {"verdict":"supported|partial|insufficient","score":0-100,"summary":"中文简述","issues":["中文问题"],"supported_passage_ids":["真实 passage_id"]}'
+        ].join("\n")
+      },
+      {
+        role: "user",
+        content: `用户目标：${clipLibraryAiText(goal, 1200)}\n\n待校验回答：${clipLibraryAiText(answer, 8000)}\n\n本地证据：${JSON.stringify(evidence)}`
+      }
+    ]
+  });
+  if (!result.ok) return result;
+  const parsed = parseJsonObject(result.content);
+  if (!parsed.ok) return { ok: false, error: `证据校验结果解析失败：${parsed.error}` };
+  const value = parsed.value || {};
+  const allowedIds = new Set(evidence.map((item) => item.passage_id));
+  const verdict = ["supported", "partial", "insufficient"].includes(value.verdict) ? value.verdict : "partial";
+  return {
+    ok: true,
+    verification: {
+      verdict,
+      score: Math.max(0, Math.min(100, Number(value.score) || 0)),
+      summary: clipLibraryAiText(value.summary, 600),
+      issues: (Array.isArray(value.issues) ? value.issues : []).slice(0, 6).map((item) => clipLibraryAiText(item, 400)).filter(Boolean),
+      supportedPassageIds: (Array.isArray(value.supported_passage_ids) ? value.supported_passage_ids : []).map(String).filter((id) => allowedIds.has(id))
+    }
+  };
+});
+
 ipcMain.handle("deepseek:balance", async (_event, apiKey) => {
   if (!apiKey) return { ok: false, error: "请先填写 DeepSeek API Key。" };
   try {
@@ -624,8 +856,133 @@ function extractJsonObject(text) {
   return value.slice(start, end + 1);
 }
 
+function normalizeEmbeddingEndpoint(value) {
+  const url = new URL(String(value || "").trim());
+  const isLocal = ["localhost", "127.0.0.1", "::1"].includes(url.hostname);
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && isLocal)) {
+    throw new Error("Embedding API 必须使用 HTTPS；本机服务可使用 HTTP。" );
+  }
+  url.pathname = url.pathname.replace(/\/+$/, "");
+  if (!/\/embeddings(?:\/multimodal)?$/i.test(url.pathname)) url.pathname += "/embeddings";
+  return url.toString();
+}
+
+function isMultimodalEmbeddingEndpoint(endpoint) {
+  try {
+    return /\/embeddings\/multimodal\/?$/i.test(new URL(endpoint).pathname);
+  } catch {
+    return false;
+  }
+}
+
+async function callMultimodalEmbedding({ endpoint, key, model, text }) {
+  let lastError = "";
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+        body: JSON.stringify({
+          model,
+          input: [{ type: "text", text }],
+          encoding_format: "float"
+        })
+      });
+      const bodyText = await response.text();
+      if (!response.ok) {
+        lastError = `Embedding 请求失败：${response.status} ${bodyText.slice(0, 1200)}`;
+      } else {
+        const data = safeJsonParse(bodyText);
+        const vector = data?.data?.embedding;
+        if (Array.isArray(vector) && vector.length) {
+          return { ok: true, vector, model: data?.model || model, usage: data?.usage || null };
+        }
+        lastError = "Embedding 接口返回了无法识别的多模态向量数据。";
+      }
+    } catch (error) {
+      lastError = `Embedding 请求失败：${error.message}`;
+    }
+    if (attempt < 3 && isRetryableError(lastError)) await sleep(700 * attempt);
+    else break;
+  }
+  return { ok: false, error: lastError || "Embedding 请求失败。" };
+}
+
+async function createMultimodalEmbeddingVectors({ endpoint, key, model, values }) {
+  const vectors = [];
+  let responseModel = model;
+  let promptTokens = 0;
+  let totalTokens = 0;
+  const concurrency = 4;
+  for (let offset = 0; offset < values.length; offset += concurrency) {
+    const results = await Promise.all(values.slice(offset, offset + concurrency).map((text) => (
+      callMultimodalEmbedding({ endpoint, key, model, text })
+    )));
+    const failure = results.find((result) => !result.ok);
+    if (failure) return failure;
+    results.forEach((result) => {
+      vectors.push(result.vector);
+      responseModel = result.model || responseModel;
+      promptTokens += Number(result.usage?.prompt_tokens) || 0;
+      totalTokens += Number(result.usage?.total_tokens) || 0;
+    });
+  }
+  return {
+    ok: true,
+    vectors,
+    model: responseModel,
+    usage: promptTokens || totalTokens ? { prompt_tokens: promptTokens, total_tokens: totalTokens } : null
+  };
+}
+
 function normalizePaperText(text) {
   return text.replace(/\r/g, "\n").replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+async function extractPdfTextWithPages(buffer) {
+  if (!pdfJsModulePromise) pdfJsModulePromise = import("pdfjs-dist/legacy/build/pdf.mjs");
+  const pdfjsLib = await pdfJsModulePromise;
+  const pageTexts = [];
+  const standardFontDataUrl = pathToFileURL(path.join(__dirname, "..", "node_modules", "pdfjs-dist", "standard_fonts") + path.sep).href;
+  const loadingTask = pdfjsLib.getDocument({
+    data: new Uint8Array(buffer),
+    disableWorker: true,
+    standardFontDataUrl
+  });
+  const document = await loadingTask.promise;
+  try {
+    for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
+      let text = "";
+      try {
+        const pageData = await document.getPage(pageNumber);
+        const content = await pageData.getTextContent();
+        let lastY;
+        for (const item of content.items || []) {
+          const y = item?.transform?.[5];
+          text += lastY === undefined || lastY === y ? String(item?.str || "") : `\n${String(item?.str || "")}`;
+          if (item?.hasEOL) text += "\n";
+          lastY = y;
+        }
+      } catch {
+        text = "";
+      }
+      pageTexts.push(normalizePaperText(text));
+    }
+  } finally {
+    await document.destroy();
+  }
+
+  let text = "";
+  const pageTextOffsets = [];
+  const pageCount = pageTexts.length;
+  for (let index = 0; index < pageCount; index += 1) {
+    const pageText = pageTexts[index] || "";
+    if (text && pageText) text += "\n\n";
+    const start = text.length;
+    text += pageText;
+    pageTextOffsets.push({ pageNumber: index + 1, start, end: text.length });
+  }
+  return { text: normalizePaperText(text), pageCount, pageTextOffsets };
 }
 
 function trimForAnalysis(text) {
@@ -759,6 +1116,10 @@ function isRetryableError(error) {
   return /\b(429|500|502|503|504)\b/.test(message) || /Internal Server Error|timeout|ECONNRESET|network|fetch failed|没有返回内容/i.test(message);
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function searchIndex(text, pattern) {
   const match = pattern.exec(text);
   return match ? match.index : -1;
@@ -799,7 +1160,8 @@ function buildPaperAnalysisMessages(fileName, text) {
         "All user-facing values must be Simplified Chinese unless the schema explicitly asks for original English.",
         "The keywords field must contain 5 to 10 short Simplified Chinese keyword phrases.",
         "Do not put English method names, full English phrases, sentences, explanations, or module descriptions in keywords.",
-        "Acronyms may appear only inside a Chinese keyword when necessary, for example: 信任校准协同学习 (TCL)."
+        "Acronyms may appear only inside a Chinese keyword when necessary, for example: 信任校准协同学习 (TCL).",
+        "Every keyword must be complete and canonical: use balanced brackets, never add list numbers, and write L1 正则化 instead of 1正则化."
       ].join("\n")
     },
     { role: "user", content: buildExtractionPrompt(fileName, text) }
@@ -844,7 +1206,7 @@ Rules:
 6. abstract_en must be the original Abstract extracted from the paper. Do not summarize or rewrite it.
 7. abstract_zh must be a faithful Simplified Chinese translation of abstract_en. Do not expand it.
 8. Motivation, contribution, method, task, domain, writing_uses, confidence_notes and other readable card fields must be Simplified Chinese.
-9. keywords must be 5 to 10 short Simplified Chinese keyword phrases. Each keyword should normally be 2 to 10 Chinese characters. Do not output English-only keywords. Do not output full sentences or explanations. If an acronym is necessary, put it after Chinese, for example "长尾识别", "信任校准协同学习 (TCL)", "知识蒸馏".
+9. keywords must be 5 to 10 short Simplified Chinese keyword phrases. Each keyword should normally be 2 to 10 Chinese characters. Do not output English-only keywords. Do not output full sentences, explanations, numbered prefixes or incomplete brackets. Use canonical notation such as "L1 正则化", never "1正则化". If an acronym is necessary, put it after Chinese, for example "长尾识别", "信任校准协同学习 (TCL)", "知识蒸馏".
 10. If there is no evidence for a field, use null or an empty array. Do not invent.
 
 Paper text:

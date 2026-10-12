@@ -4,7 +4,8 @@ const path = require("path");
 const {
   extractLibraryAiTerms,
   retrieveLibraryCandidates,
-  toApiCandidate
+  toApiCandidate,
+  toLocalMatch
 } = require("../library-ai.js");
 
 const root = path.resolve(__dirname, "..");
@@ -65,5 +66,13 @@ assert(!results.some((item) => item.id === "other"), "unrelated paper should not
 const apiCandidate = toApiCandidate(results[0]);
 assert.strictEqual(apiCandidate.id, "both");
 assert(!Object.prototype.hasOwnProperty.call(apiCandidate, "_fields"), "private local search fields must not be sent to AI");
+
+const localMatch = toLocalMatch(results[0]);
+assert.strictEqual(localMatch.paperId, "both");
+assert(localMatch.reason.includes("长尾分布"), "local match should explain the matched terms");
+
+const libraryAiSource = read("library-ai.js");
+assert(libraryAiSource.includes("查看全部本地匹配"), "library AI must offer an all-local-matches view");
+assert(libraryAiSource.includes("allLocalCandidates.slice(0, MAX_CANDIDATES)"), "only the top candidates should be sent to AI");
 
 console.log("library-ai checks passed");
