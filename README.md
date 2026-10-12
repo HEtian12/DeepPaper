@@ -85,7 +85,7 @@ npm run dist -- --publish never
 
 2026-10-12 的自动检查、Windows 集成冒烟和本地打包已通过，环境、产物哈希及尚未验证的范围见 [本地验收记录](docs/verification.md)。
 
-目前尚无经过人工标注的真实文献检索基准，因此不宣称 Recall、引用准确率或性能提升。下一阶段将比较关键词、纯向量和混合检索，详见 [评测计划](docs/evaluation.md)。
+已提供离线 RAG 评测工具，可在同一批人工标注问题上比较关键词、纯向量和混合检索，并保存逐条排名与指标。先用 `npm run eval:rag -- demo --out artifacts/rag-eval-demo` 检查流程；真实论文标注、向量准备和运行步骤见 [评测指南](docs/evaluation.md)。目前尚无真实文献基准结果，因此不宣称 Recall、引用准确率或性能提升。
 
 ## 数据与能力边界
 

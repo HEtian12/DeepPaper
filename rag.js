@@ -190,7 +190,8 @@
     const text = normalizeText(value);
     if (!text) return [];
     const target = Math.max(320, Number(options.target) || DEFAULT_TARGET);
-    const overlap = Math.min(Math.floor(target / 3), Math.max(0, Number(options.overlap) || DEFAULT_OVERLAP));
+    const requestedOverlap = options.overlap === undefined ? DEFAULT_OVERLAP : Number(options.overlap);
+    const overlap = Math.min(Math.floor(target / 3), Math.max(0, Number.isFinite(requestedOverlap) ? requestedOverlap : DEFAULT_OVERLAP));
     const chunks = [];
     let start = 0;
     while (start < text.length) {
@@ -232,7 +233,10 @@
         text: String(paper.text).slice(item.start, item.end)
       }))
       : [{ pageNumber: null, estimatedPage: pageCount > 1, sourceStart: 0, text }];
-    const cleaned = cleanPdfPages(rawSegments);
+    const cleaningVersion = options.cleaning === false ? 0 : CLEANING_VERSION;
+    const cleaned = options.cleaning === false
+      ? { pages: rawSegments, stats: { version: 0, pages: rawSegments.length, removedHeaderFooterLines: 0, removedPageNumberLines: 0, repairedHyphenations: 0 } }
+      : cleanPdfPages(rawSegments);
     const passages = [];
     let ordinal = 0;
     let currentSection = "";
@@ -263,7 +267,7 @@
           ordinal,
           pageCharStart: chunk.start,
           pageCharEnd: chunk.end,
-          cleaningVersion: CLEANING_VERSION,
+          cleaningVersion,
           contentHash: chunkHash,
           text: chunk.text,
           keywords,
@@ -280,7 +284,7 @@
             ordinal,
             pageCharStart: chunk.start,
             pageCharEnd: chunk.end,
-            cleaningVersion: CLEANING_VERSION,
+            cleaningVersion,
             contentHash: chunkHash
           }
         });
@@ -296,7 +300,8 @@
   }
 
   function buildPassageIndex(paperList, options = {}) {
-    const cleaningStats = { version: CLEANING_VERSION, pages: 0, removedHeaderFooterLines: 0, removedPageNumberLines: 0, repairedHyphenations: 0, duplicatePassages: 0 };
+    const cleaningVersion = options.cleaning === false ? 0 : CLEANING_VERSION;
+    const cleaningStats = { version: cleaningVersion, pages: 0, removedHeaderFooterLines: 0, removedPageNumberLines: 0, repairedHyphenations: 0, duplicatePassages: 0 };
     const passages = [];
     (Array.isArray(paperList) ? paperList : []).forEach((paper) => {
       const result = buildPaperPassageData(paper, options);
@@ -306,7 +311,7 @@
       });
     });
     cleaningStats.duplicatePassages = passages.length - new Set(passages.map((passage) => passage.contentHash)).size;
-    return { version: INDEX_VERSION, cleaningVersion: CLEANING_VERSION, passages, cleaningStats };
+    return { version: INDEX_VERSION, cleaningVersion, passages, cleaningStats };
   }
 
   function fallbackTerms(query) {

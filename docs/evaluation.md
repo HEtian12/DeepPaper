@@ -1,6 +1,54 @@
 # RAG 评测计划
 
-状态：设计阶段，尚未完成真实数据标注或运行质量基准。当前检查脚本及 mock 集成测试验证功能行为，不构成检索质量结果。
+状态：离线评测程序、三路检索入口、合成样例与缓存向量生成命令已实现；尚未完成真实数据标注或真实质量基准。当前合成样例仅验证评测程序，不能当作论文检索成绩。
+
+## 运行现有评测工具
+
+```bash
+npm run eval:rag -- demo --out artifacts/rag-eval-demo
+```
+
+生成 `corpus.json`、`questions.json`、`vectors.json`、`report.json` 和 `report.md`。合成向量仅由关键词规则生成，用于验证三路流程，不是 Embedding 模型输出。
+
+用软件左上角“导出库”得到 JSON 后，在本机生成只保留评测所需字段的论文库和空白标注模板：
+
+```bash
+npm run eval:rag -- import --library <文献库导出.json> --out evaluation/local
+```
+
+若导出缺少页码映射且原 PDF 仍在本机，把 `--rebuild-pages` 加到这条命令末尾。
+
+导入器只接收有全文和精确 `pageTextOffsets` 的 PDF 论文。旧导出若缺少页码映射，但原 PDF 路径仍可访问，可以添加 `--rebuild-pages`，在本机逐页重新提取正文及页码；扫描版 PDF 无可提取文本时会跳过。这个操作只读原 PDF，不调用外部服务。导入还生成 `corpus-audit.json`（空页/短页统计）和 `annotation-candidates.json`（每篇论文的原文摘录，供人工选题）。PDF 字体或字符映射警告可能造成局部提取缺陷，标注前须在原 PDF 核实。`evaluation/local/` 已加入 `.gitignore`，原始 PDF 路径、Key、图片、任务历史及合集不会写入生成的评测库。生成的 `corpus.json` 仍包含论文全文，必须留在私人目录。
+
+在 `evaluation/local/questions.template.json` 中填入真实问题与原文证据并另存为 `questions.json`。顶层 `annotationStatus` 初始为 `draft`，每条都由人工核对 PDF 后才改为 `verified`。每个问题包含 `id`、`query`、`type`、`split`（`development` 或 `test`）、`answerable`、`reviewedBy`、`notes`、`evidence`。每条证据包含稳定 `id`、`paperId`、原始 PDF 的 `pageNumber`、页上逐字 `quote` 和相关性等级 `relevance`（1 或 2）。无答案问题设 `answerable: false` 且 `evidence: []`。标注示例可在合成样例的 `questions.json` 中查看。`draft` 报告会明确标成未验证，不能作为简历质量指标。
+
+先跑关键词基线：
+
+```bash
+npm run eval:rag -- run --corpus evaluation/local/corpus.json --questions evaluation/local/questions.json --mode keyword --split development --k 5 --out evaluation/local/keyword
+```
+
+向量和混合检索需要和这次切片配置对应的文本向量。先导出**全部问题**及切片的待向量化文本：
+
+```bash
+npm run eval:rag -- inputs --corpus evaluation/local/corpus.json --questions evaluation/local/questions.json --split all --out evaluation/local
+```
+
+`embedding-inputs.json` 包含精确文本和 SHA-256，可用已有服务按自己的预算生成 `vectors.json`。也可显式运行下面的 API 命令；Key 只从环境变量 `DEEPPAPER_EVAL_EMBEDDING_KEY` 读取，命令参数不接收 Key。`--max-inputs` 是**本次最多发送的文本条数**，支持重复执行续跑；多模态地址使用 `--batch 1`。运行前确认模型已开通及计费方式。
+
+```bash
+npm run eval:rag -- embed --inputs evaluation/local/embedding-inputs.json --out evaluation/local --endpoint <Embedding-API地址> --model <模型名> --provider <服务商> --revision <模型版本或Endpoint版本> --kind real --max-inputs 20 --batch 1
+```
+
+向量生成期间的已完成批次追加到 `vectors.ndjson`，中断后可以用相同命令续跑；全部文本齐备后才生成 `vectors.json`。向量全部生成后，固定同一套库、问题、Top-K 和切片配置运行三路比较：
+
+```bash
+npm run eval:rag -- run --corpus evaluation/local/corpus.json --questions evaluation/local/questions.json --vectors evaluation/local/vectors.json --mode all --split test --k 5 --out evaluation/local/test
+```
+
+`--target` 默认 820 字符，`--overlap` 默认 120 字符，`--cleaning on|off` 默认开启；每次改变它们都要重新执行 `inputs` 并补齐新切片的向量。`--repeats` 默认 5 次，另有每问题每模式 1 次预热。`report.md` 用于阅读，`report.json` 保留排名、全文片段、每次耗时、输入哈希和环境信息。它们可能包含私人论文内容，不要直接上传。
+
+评测不会静默把缺失向量的混合检索降级为关键词检索；若向量与文本哈希或维度不符会报错。离线检索过程不发网络请求。生成向量时才调用指定服务，已完成的批次写入本地缓存。
 
 ## 下一阶段的最小交付
 
@@ -31,10 +79,10 @@
 | --- | --- |
 | Recall@K | Top-K 中命中的相关证据数 / 所有标注相关证据数；按问题宏平均，避免重复或重叠 Chunk 重复计数 |
 | MRR@K | 第一个正确结果排名的倒数；Top-K 未命中记 0 |
-| 页码命中率 | 返回证据匹配标注论文及原始 PDF 页码的比例；精确页码与估算页码分开统计 |
-| 无答案误命中率 | 无答案问题被错误判定为有充分证据的比例 |
-| 延迟与内存 | 记录查询 p50/p95、峰值内存，区分模型耗时、向量加载、检索及融合 |
-| API 用量 | 实际记录请求次数、服务商返回的 token 用量；金额仅按已确认单价计算 |
+| 页码召回率 | 返回结果匹配标注论文及原始 PDF 页码的比例，按问题宏平均；精确页码与估算页码的数字吻合单独统计，后者不能证明真实页码正确 |
+| 无答案返回非空率 | 只测“返回了邻居段落”，不是“声称有充分证据”；尚未实现回答层无答案误判率，因此报告该项为 `null` |
+| 延迟与内存 | 当前记录预热后的本机检索 p50/p95、索引构建与向量校验耗时、报告时 RSS；尚未测进程峰值内存或模型回答耗时 |
+| API 用量 | `embed` 命令记录实际请求次数及服务商返回的 token 用量；服务商未返回时统计值为零但不表示免费，报告不计算金额 |
 
 有答案问题计算 Recall/MRR，无答案问题单独统计，不把没有相关证据的问题当作 Recall 的零分样本。检索指标和生成回答的证据支持率分别报告；模型自评需要人工抽检。
 

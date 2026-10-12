@@ -233,6 +233,7 @@
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
       extractLibraryAiTerms,
+      termAliases,
       buildLibraryCandidate,
       retrieveLibraryCandidates,
       toApiCandidate,

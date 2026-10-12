@@ -20,6 +20,7 @@ npm start
 | --- | --- | --- |
 | `npm test` / `npm run check` | JS 语法、加载关系和固定样例断言，含关键词、清洗、页码、向量及本地工具 | 真实论文检索质量或真实模型效果 |
 | `npm run test:e2e` / `npm run smoke:pdf-reader` | 启动 Electron；生成小型 PDF；验证文本层、关键词编辑、RAG/IndexedDB、Embedding IPC 重试、历史语料持久化和原文回跳 | 全部交互路径、真实模型任务成功率、所有 PDF 版式 |
+| `npm run eval:rag -- demo --out artifacts/rag-eval-demo` | 合成数据上跑关键词、纯向量和混合检索，验证评测程序、报告及页码指标 | 真实论文检索效果；合成向量不是模型输出 |
 | `npm run dist -- --publish never` | 生成 Windows portable EXE | 安装包在干净机器上的完整验证 |
 
 冒烟测试使用临时 `--user-data-dir`，不读取日常文献库。Embedding 请求连接 `127.0.0.1` 的测试服务，向量是合成数据。测试结束关闭 Electron 并尝试清理临时目录。

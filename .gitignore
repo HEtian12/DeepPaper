@@ -10,3 +10,4 @@ deeppaper-library-*.json
 artifacts/
 coverage/
 test-results/
+evaluation/local/

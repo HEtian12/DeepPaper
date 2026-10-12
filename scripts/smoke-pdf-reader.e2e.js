@@ -76,7 +76,8 @@ function createCdpClient(url) {
   ws.addEventListener("message", (event) => {
     const message = JSON.parse(event.data);
     if (!message.id || !pending.has(message.id)) return;
-    const { resolve, reject } = pending.get(message.id);
+    const { resolve, reject, timer } = pending.get(message.id);
+    clearTimeout(timer);
     pending.delete(message.id);
     if (message.error) reject(new Error(message.error.message));
     else resolve(message.result);
@@ -88,7 +89,11 @@ function createCdpClient(url) {
       const id = nextId;
       nextId += 1;
       return new Promise((resolve, reject) => {
-        pending.set(id, { resolve, reject });
+        const timer = setTimeout(() => {
+          pending.delete(id);
+          reject(new Error(`CDP ${method} timed out after 45 seconds`));
+        }, 45000);
+        pending.set(id, { resolve, reject, timer });
         ws.send(JSON.stringify({ id, method, params }));
       });
     }

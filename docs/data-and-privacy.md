@@ -28,3 +28,7 @@ JSON 文献库导出包含论文记录及正文/解析结果、语料、合集�
 当前导出不包含 API 配置、原始 PDF 文件字节和 IndexedDB 向量缓存。迁移电脑后需要重新配置接口，复制或重新定位原始 PDF，并重新建立语义索引。备份完整 Electron 用户目录可能包含密钥，不应作为演示资料分发。
 
 自动测试只使用代码生成的 PDF、合成文本和模拟 Embedding 服务，不需要使用个人论文或真实密钥。
+
+## RAG 评测数据
+
+离线评测导入器从文献库导出文件生成只含论文文本、元数据和精确页码映射的私有 `corpus.json`，不复制 API Key、原 PDF 路径或任务历史。`embedding-inputs.json`、`vectors.json` 和检索报告也可能包含私有文本或问题；建议全部放在已忽略的 `evaluation/local/` 目录。只有明确执行 `eval:rag embed` 才会向所选 Embedding API 发送文本。
