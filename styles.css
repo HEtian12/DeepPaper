@@ -2244,6 +2244,74 @@ body.source-focus .detail {
   margin: 12px 0 18px;
 }
 
+.agent-task-actions {
+  margin: 0 0 16px;
+}
+
+.agent-execution-trace {
+  border: 1px solid var(--line);
+  margin: 0 0 18px;
+  padding: 9px 12px;
+}
+
+.agent-execution-trace > summary {
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.agent-execution-trace ol {
+  display: grid;
+  gap: 8px;
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+}
+
+.agent-trace-step {
+  border-left: 2px solid var(--line);
+  padding: 4px 0 4px 10px;
+}
+
+.agent-trace-step.failed,
+.agent-trace-step.cancelled {
+  border-color: var(--danger);
+}
+
+.agent-trace-step > div {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.agent-trace-step > div span,
+.agent-trace-step > div small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.agent-trace-step p {
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 5px 0;
+  overflow-wrap: anywhere;
+}
+
+.agent-trace-step pre {
+  background: var(--surface);
+  font-size: 11px;
+  margin: 6px 0;
+  max-height: 180px;
+  overflow: auto;
+  padding: 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.agent-trace-error {
+  color: var(--danger);
+}
+
 .agent-status {
   border: 1px solid var(--line);
   color: var(--muted);
@@ -2529,6 +2597,12 @@ body.source-focus .detail {
   min-height: 88px;
   resize: vertical;
 }
+.agent-asr-settings { display: grid; gap: 6px; color: var(--muted); font-size: 12px; }
+.agent-asr-settings summary { cursor: pointer; width: fit-content; }
+.agent-asr-settings input { min-height: 34px; }
+.agent-asr-status { min-height: 0; color: var(--muted); font-size: 12px; }
+.agent-asr-status.error { color: var(--danger, #b42318); }
+
 
 .agent-composer-actions {
   justify-content: flex-end;

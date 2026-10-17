@@ -1,5 +1,18 @@
 # DeepPaper
 
+项目技术选型、架构、实现问题与简历表述见[项目制作说明](docs/project-build.md)。
+
+## 本地 Embedding（Ollama）
+
+语义检索可以选择本地 Ollama Embedding，不需要 Embedding API Key，也不会把用于向量化的论文段落发送到云端。此模式仅覆盖 Embedding；论文解析、Agent 对话等仍按各自配置使用对应服务。
+
+1. 安装并启动 Ollama。
+2. 在终端下载一个支持 Embedding 的模型，例如：`ollama pull qwen3-embedding`。
+3. 在 DeepPaper「配置 → 编辑接口 → 语义检索」中启用混合检索，将运行方式选为「本地 Ollama」，地址填 `http://127.0.0.1:11434`，模型填 `qwen3-embedding`，保存接口。
+4. 打开文献 Agent，点击「更新语义索引」。首次索引会在本机计算向量，之后通过 IndexedDB 缓存复用。
+
+模型下载完成且 Ollama 服务运行时，向量化和语义检索可离线工作；安装包本身不包含 Ollama 或模型权重。切换云端/本地模型会使用各自的向量缓存。
+
 本地优先的学术文献 Research Agent，将 PDF 阅读、论文解析、混合检索和可回溯的正文证据放在同一个桌面工作区。
 
 **当前源码版本：0.1.48。** 工程整理和新增功能记录在 [CHANGELOG](CHANGELOG.md)；GitHub 历史安装包不一定包含当前源码的全部功能。

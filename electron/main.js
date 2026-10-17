@@ -1,11 +1,14 @@
-const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, shell, session } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs/promises");
 const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
+const { validateToolCall, normalizeReadPaperIds } = require("../agent-tools.js");
+const { transcribeWithWhisper } = require("./asr.js");
 
 let pdfJsModulePromise = null;
+const agentRunControllers = new Map();
 
 const API_BASES = {
   deepseek: "https://api.deepseek.com",
@@ -31,6 +34,13 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+    const isAppWindow = BrowserWindow.getAllWindows().some((win) => win.webContents === webContents);
+    const isLocalAudioRequest = permission === "media"
+      && details?.mediaTypes?.includes("audio")
+      && String(details?.requestingUrl || "").startsWith("file://");
+    callback(Boolean(isAppWindow && isLocalAudioRequest));
+  });
   createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -451,15 +461,47 @@ ipcMain.handle("library:ai-chat", async (_event, payload) => {
 });
 
 ipcMain.handle("embeddings:create", async (_event, payload) => {
-  const { embeddingBaseUrl, embeddingApiKey, apiKey, embeddingModel, input } = payload || {};
+  const { embeddingProvider, embeddingBaseUrl, embeddingApiKey, apiKey, embeddingModel, input } = payload || {};
+  const provider = embeddingProvider === "ollama" ? "ollama" : "api";
   const key = String(embeddingApiKey || apiKey || "").trim();
   const model = String(embeddingModel || "").trim();
   const values = (Array.isArray(input) ? input : [input])
     .map((item) => String(item || "").trim().slice(0, 8000))
     .filter(Boolean)
     .slice(0, 32);
-  if (!key || !model || !embeddingBaseUrl) return { ok: false, error: "Embedding 配置不完整。" };
+  if (!model || !embeddingBaseUrl || (provider !== "ollama" && !key)) return { ok: false, error: "Embedding 配置不完整。" };
   if (!values.length) return { ok: false, error: "没有可向量化的文本。" };
+
+  if (provider === "ollama") {
+    let endpoint;
+    try {
+      const url = new URL(String(embeddingBaseUrl).trim());
+      if (url.protocol !== "http:" || !["localhost", "127.0.0.1", "::1"].includes(url.hostname)) {
+        throw new Error("本地 Ollama 地址必须是 localhost 或 127.0.0.1 的 HTTP 地址。");
+      }
+      url.pathname = `${url.pathname.replace(/\/+$/, "")}/api/embed`;
+      endpoint = url.toString();
+    } catch (error) {
+      return { ok: false, error: error.message || "Ollama 地址无效。" };
+    }
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model, input: values })
+      });
+      const bodyText = await response.text();
+      if (!response.ok) return { ok: false, error: `本地 Ollama Embedding 请求失败：${response.status} ${bodyText.slice(0, 1200)}`, endpoint, model };
+      const data = safeJsonParse(bodyText);
+      const vectors = Array.isArray(data?.embeddings) ? data.embeddings : [];
+      if (vectors.length !== values.length || vectors.some((vector) => !Array.isArray(vector) || !vector.length)) {
+        return { ok: false, error: "本地 Ollama 返回的向量数量或格式无效。", endpoint, model };
+      }
+      return { ok: true, vectors, model: data?.model || model, usage: null };
+    } catch (error) {
+      return { ok: false, error: `无法连接本地 Ollama：${error.message}。请确认 Ollama 正在运行且模型已下载。`, endpoint, model };
+    }
+  }
 
   let endpoint;
   try {
@@ -515,7 +557,7 @@ ipcMain.handle("embeddings:create", async (_event, payload) => {
 });
 
 ipcMain.handle("agent:step", async (_event, payload) => {
-  const { apiKey, provider = "deepseek", model, goal, transcript } = payload || {};
+  const { apiKey, provider = "deepseek", model, goal, transcript, runId } = payload || {};
   if (!apiKey) return { ok: false, error: `请先配置 ${providerLabel(provider)} API Key。` };
   if (!String(goal || "").trim()) return { ok: false, error: "请输入 Agent 任务。" };
 
@@ -539,7 +581,7 @@ ipcMain.handle("agent:step", async (_event, payload) => {
         "1. search_library：在全库检索论文。参数 {query:string, limit:number}。任务开始时通常先调用它。",
         "2. search_passages：从 PDF 正文段落中进行关键词与语义混合检索并重排证据。参数 {query:string, limit:number}。回答论文内容、方法或结果问题时优先调用。",
         "3. read_passages：读取段落及相邻上下文。参数 {passage_ids:string[]}。需要核实上下文时调用。",
-        "4. read_papers：读取指定论文的结构化解析。参数 {paper_ids:string[], sections:string[]}。sections 可包含 abstract、motivation、method、contributions、results、keywords、metadata。",
+        "4. read_papers：读取指定论文的结构化解析。参数 {paper_ids:string[], sections:string[]}。paper_ids 必须逐字复制最近 search_library 结果里的 paper_id，单次最多 6 篇；不要传标题。sections 可包含 abstract、motivation、method、contributions、results、keywords、metadata。",
         "5. compare_papers：为多篇论文获取对比材料。参数 {paper_ids:string[], focus:string}。",
         "6. propose_collection：提出合集写入方案，但必须由用户确认后才执行。参数 {name:string, paper_ids:string[], rationale:string}。",
         "7. build_evidence_map：读取多篇论文的问题、方法、数据集、结果和局限，构建可比较的证据图谱。参数 {paper_ids:string[]}。研究空白、方法关系和跨论文综合任务应调用。",
@@ -560,14 +602,19 @@ ipcMain.handle("agent:step", async (_event, payload) => {
     }
   ];
 
+  const controller = new AbortController();
+  const requestId = String(runId || "");
+  if (requestId) agentRunControllers.set(requestId, controller);
   const result = await callChatWithRetry({
     provider,
     apiKey,
     model,
     temperature: 0.1,
     responseFormat: { type: "json_object" },
-    messages
+    messages,
+    signal: controller.signal
   });
+  if (requestId && agentRunControllers.get(requestId) === controller) agentRunControllers.delete(requestId);
   if (!result.ok) return result;
 
   const parsed = parseJsonObject(result.content);
@@ -578,15 +625,15 @@ ipcMain.handle("agent:step", async (_event, payload) => {
   const value = parsed.value;
   const summary = clipLibraryAiText(value.decision_summary, 500);
   if (value.status === "tool") {
-    const name = String(value.tool?.name || "");
-    const allowedTools = new Set(["search_library", "search_passages", "read_passages", "read_papers", "compare_papers", "build_evidence_map", "propose_collection"]);
-    if (!allowedTools.has(name)) return { ok: false, error: `Agent 请求了不支持的工具：${name || "空"}` };
+    value.tool = normalizeReadPaperIds(value.tool, safeTranscript);
+    const validation = validateToolCall(value.tool);
+    if (!validation.ok) return { ok: false, error: `Agent tool arguments invalid: ${validation.error}` };
     return {
       ok: true,
       step: {
         status: "tool",
         decisionSummary: summary,
-        tool: { name, arguments: value.tool?.arguments && typeof value.tool.arguments === "object" ? value.tool.arguments : {} }
+        tool: validation.tool
       }
     };
   }
@@ -610,8 +657,19 @@ ipcMain.handle("agent:step", async (_event, payload) => {
   };
 });
 
+ipcMain.handle("agent:cancel", async (_event, runId) => {
+  const requestId = String(runId || "");
+  const controller = agentRunControllers.get(requestId);
+  if (!controller) return { ok: true, cancelled: false };
+  controller.abort();
+  agentRunControllers.delete(requestId);
+  return { ok: true, cancelled: true };
+});
+
+ipcMain.handle("audio:transcribe", async (_event, payload = {}) => transcribeWithWhisper(payload));
+
 ipcMain.handle("agent:verify", async (_event, payload) => {
-  const { apiKey, provider = "deepseek", model, goal, answer, citations } = payload || {};
+  const { apiKey, provider = "deepseek", model, goal, answer, citations, runId } = payload || {};
   const evidence = (Array.isArray(citations) ? citations : []).slice(0, 16).map((item) => ({
     passage_id: clipLibraryAiText(item?.passageId, 180),
     paper_title: clipLibraryAiText(item?.paperTitle, 300),
@@ -626,12 +684,16 @@ ipcMain.handle("agent:verify", async (_event, payload) => {
     };
   }
 
+  const controller = new AbortController();
+  const requestId = String(runId || "");
+  if (requestId) agentRunControllers.set(requestId, controller);
   const result = await callChatWithRetry({
     provider,
     apiKey,
     model,
     temperature: 0,
     responseFormat: { type: "json_object" },
+    signal: controller.signal,
     messages: [
       {
         role: "system",
@@ -648,6 +710,7 @@ ipcMain.handle("agent:verify", async (_event, payload) => {
       }
     ]
   });
+  if (requestId && agentRunControllers.get(requestId) === controller) agentRunControllers.delete(requestId);
   if (!result.ok) return result;
   const parsed = parseJsonObject(result.content);
   if (!parsed.ok) return { ok: false, error: `证据校验结果解析失败：${parsed.error}` };
@@ -696,12 +759,14 @@ async function callChatWithRetry(options) {
   let lastResult = null;
   let attemptsUsed = 0;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    if (options.signal?.aborted) return { ok: false, error: "请求已取消。", cancelled: true };
     attemptsUsed = attempt;
     const result = await callChat(options);
     if (result.ok) return attempt > 1 ? { ...result, retried: attempt - 1 } : result;
     lastResult = result;
     if (!isRetryableError(result.error) || attempt >= maxAttempts) break;
     await sleep(900 * attempt + Math.floor(Math.random() * 400));
+    if (options.signal?.aborted) return { ok: false, error: "请求已取消。", cancelled: true };
   }
   return {
     ...lastResult,
@@ -710,7 +775,7 @@ async function callChatWithRetry(options) {
   };
 }
 
-async function callChat({ provider = "deepseek", apiKey, model, messages, temperature, responseFormat }) {
+async function callChat({ provider = "deepseek", apiKey, model, messages, temperature, responseFormat, signal }) {
   const baseUrl = API_BASES[provider] || API_BASES.deepseek;
   const body = { model: model || defaultModel(provider), temperature, messages };
   if (responseFormat) body.response_format = responseFormat;
@@ -719,7 +784,8 @@ async function callChat({ provider = "deepseek", apiKey, model, messages, temper
     const response = await fetch(`${baseUrl}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal
     });
     if (!response.ok) {
       const message = await response.text();

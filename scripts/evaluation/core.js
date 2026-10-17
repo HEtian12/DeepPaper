@@ -148,15 +148,34 @@ function evidenceMatches(passage, evidence) {
     && normalizeQuote(passage.text).includes(normalizeQuote(evidence.quote));
 }
 
-function scoreResults(question, results, k) {
+function evidenceMatchesContext(passage, evidence, index, windowSize = 1) {
+  if (!index?.passages || passage.paperId !== evidence.paperId) return false;
+  const context = index.passages
+    .filter((candidate) => candidate.paperId === passage.paperId
+      && candidate.pageNumber === evidence.pageNumber
+      && Boolean(candidate.estimatedPage) === Boolean(passage.estimatedPage)
+      && Math.abs(candidate.ordinal - passage.ordinal) <= windowSize)
+    .sort((left, right) => left.ordinal - right.ordinal)
+    .map((candidate) => candidate.text)
+    .join("\n");
+  return normalizeQuote(context).includes(normalizeQuote(evidence.quote));
+}
+
+function scoreResults(question, results, k, indexData = null) {
   const top = results.slice(0, k);
   const hits = new Set();
+  const contextHits = new Set();
   let firstRank = null;
-  top.forEach((passage, index) => {
+  let contextFirstRank = null;
+  top.forEach((passage, rankIndex) => {
     for (const e of question.evidence) {
       if (evidenceMatches(passage, e)) {
         hits.add(e.id);
-        firstRank ??= index + 1;
+        firstRank ??= rankIndex + 1;
+      }
+      if (evidenceMatchesContext(passage, e, indexData)) {
+        contextHits.add(e.id);
+        contextFirstRank ??= rankIndex + 1;
       }
     }
   });
@@ -165,10 +184,14 @@ function scoreResults(question, results, k) {
   return {
     recallAtK: question.answerable ? hits.size / question.evidence.length : null,
     reciprocalRankAtK: question.answerable ? (firstRank === null ? 0 : 1 / firstRank) : null,
+    contextRecallAtK: question.answerable ? contextHits.size / question.evidence.length : null,
+    contextReciprocalRankAtK: question.answerable ? (contextFirstRank === null ? 0 : 1 / contextFirstRank) : null,
     exactPageRecallAtK: question.answerable ? pageCount(false) / pages.length : null,
     estimatedPageRecallAtK: question.answerable ? pageCount(true) / pages.length : null,
     hitEvidenceIds: [...hits],
     missedEvidenceIds: question.evidence.filter((e) => !hits.has(e.id)).map((e) => e.id),
+    contextHitEvidenceIds: [...contextHits],
+    missedContextEvidenceIds: question.evidence.filter((e) => !contextHits.has(e.id)).map((e) => e.id),
     returnedCount: top.length
   };
 }
@@ -216,7 +239,7 @@ function runEvaluation(corpus, annotations, cache, options = {}) {
       samples.push(...latencyMs);
       return {
         questionId: question.id, query: question.query, type: question.type, answerable: question.answerable,
-        ...scoreResults(question, results, prepared.config.k), latencyMs,
+        ...scoreResults(question, results, prepared.config.k, prepared.index), latencyMs,
         results: results.map((p) => ({
           passageId: p.passageId, paperId: p.paperId, pageNumber: p.pageNumber,
           estimatedPage: p.estimatedPage, text: p.text, lexicalScore: p.score ?? null,
@@ -228,6 +251,8 @@ function runEvaluation(corpus, annotations, cache, options = {}) {
     const metrics = {
       recallAtK: mean(rows.map((r) => r.recallAtK)),
       mrrAtK: mean(rows.map((r) => r.reciprocalRankAtK)),
+      contextRecallAtK: mean(rows.map((r) => r.contextRecallAtK)),
+      contextMrrAtK: mean(rows.map((r) => r.contextReciprocalRankAtK)),
       exactPageRecallAtK: mean(rows.map((r) => r.exactPageRecallAtK)),
       estimatedPageRecallAtK: mean(rows.map((r) => r.estimatedPageRecallAtK)),
       unanswerableNonemptyRate: mean(unanswerable.map((r) => Number(r.returnedCount > 0))),
@@ -247,7 +272,7 @@ function runEvaluation(corpus, annotations, cache, options = {}) {
       ...prepared.config, candidateLimitPerRoute: 60,
       lexicalTermPolicy: "production extractLibraryAiTerms + termAliases",
       diversity: "all modes: max(2, ceil(k/4)) per paper, then fill remaining slots",
-      evidencePolicy: "full normalized quote in one chunk; deduplicate by gold evidence id",
+      evidencePolicy: "strict: full normalized quote in one chunk; context: retrieved chunk plus one adjacent chunk on the same source page; deduplicate by gold evidence id",
       warmupQueriesPerQuestionPerMode: 1
     },
     model: needsVectors ? { provider: cache.model.provider, name: cache.model.name, revision: cache.model.revision, preprocessing: cache.model.preprocessing, dimensions: cache.model.dimensions } : null,
@@ -258,6 +283,7 @@ function runEvaluation(corpus, annotations, cache, options = {}) {
     timing: { indexBuildMs: prepared.buildMs, vectorValidationMs, scope: "warm in-process retrieval only; excludes JSON file reads, network, embedding, and answer generation" },
     externalRequests: 0, embeddingTokens: null,
     unmappedEvidence: prepared.questions.flatMap((q) => q.evidence.filter((e) => !prepared.index.passages.some((p) => evidenceMatches(p, e))).map((e) => ({ questionId: q.id, evidenceId: e.id }))),
+    unmappedContextEvidence: prepared.questions.flatMap((q) => q.evidence.filter((e) => !prepared.index.passages.some((p) => evidenceMatchesContext(p, e, prepared.index))).map((e) => ({ questionId: q.id, evidenceId: e.id }))),
     runs
   };
 }
@@ -267,19 +293,25 @@ function markdownReport(report) {
   const safe = (value) => String(value).replace(/[|\r\n]/g, " ").replace(/</g, "&lt;");
   const k = report.settings.k;
   const lines = ["# RAG Evaluation", "", `Purpose: ${report.purpose}`, "", `Split: ${report.settings.split}; questions: ${report.counts.questions}; passages: ${report.counts.passages}.`, "",
-    `| Mode | Recall@${k} | MRR@${k} | Exact page recall | Estimated page recall | p50 ms | p95 ms |`,
-    "| --- | --- | --- | --- | --- | --- | --- |"];
+    `| Mode | Passage Recall@${k} | Passage MRR@${k} | Context Recall@${k} | Context MRR@${k} | Exact page recall | p50 ms | p95 ms |`,
+    "| --- | --- | --- | --- | --- | --- | --- | --- |"];
   for (const { mode, metrics: m } of report.runs) {
-    lines.push(`| ${mode} | ${[m.recallAtK, m.mrrAtK, m.exactPageRecallAtK, m.estimatedPageRecallAtK, m.latencyP50Ms, m.latencyP95Ms].map(number).join(" | ")} |`);
+    lines.push(`| ${mode} | ${[m.recallAtK, m.mrrAtK, m.contextRecallAtK, m.contextMrrAtK, m.exactPageRecallAtK, m.latencyP50Ms, m.latencyP95Ms].map(number).join(" | ")} |`);
   }
-  lines.push("", "Unanswerable nonempty rate measures returned neighbors, NOT false supported answers. Answer sufficiency is not evaluated.", "", "## Missed Evidence", "");
+  lines.push("", "Passage metrics require the full normalized quote in one retrieved chunk. Context metrics use the retrieved chunk plus one adjacent chunk on the same source page, matching the agent reader. Unanswerable nonempty rate measures returned neighbors, NOT false supported answers. Answer sufficiency is not evaluated.", "", "## Strict Passage Misses", "");
   for (const run of report.runs) {
     for (const row of run.rows.filter((r) => r.missedEvidenceIds.length)) {
       lines.push(`- ${run.mode} / ${safe(row.questionId)}: ${safe(row.query)}; missed: ${row.missedEvidenceIds.map(safe).join(", ")}`);
     }
   }
-  lines.push("", `Unmapped gold anchors: ${report.unmappedEvidence.length}. These remain in the recall denominator.`, "", "Full rankings, raw timing samples, source hashes and settings are in report.json. Reports can contain private queries and paper text; do not publish without review.", "");
+  lines.push("", "## Context Misses", "");
+  for (const run of report.runs) {
+    for (const row of run.rows.filter((r) => r.missedContextEvidenceIds.length)) {
+      lines.push(`- ${run.mode} / ${safe(row.questionId)}: ${safe(row.query)}; missed: ${row.missedContextEvidenceIds.map(safe).join(", ")}`);
+    }
+  }
+  lines.push("", `Unmapped gold anchors: ${report.unmappedEvidence.length} at passage level; ${report.unmappedContextEvidence.length} at context level. These remain in the recall denominator.`, "", "Full rankings, raw timing samples, source hashes and settings are in report.json. Reports can contain private queries and paper text; do not publish without review.", "");
   return lines.join("\n");
 }
 
-module.exports = { MODES, sha256, normalizeQuote, settings, validateDataset, prepare, embeddingInputs, validateVectors, evidenceMatches, scoreResults, retrieve, percentile, runEvaluation, markdownReport };
+module.exports = { MODES, sha256, normalizeQuote, settings, validateDataset, prepare, embeddingInputs, validateVectors, evidenceMatches, evidenceMatchesContext, scoreResults, retrieve, percentile, runEvaluation, markdownReport };

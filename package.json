@@ -1,6 +1,6 @@
 {
   "name": "deeppaper-deepseek",
-  "version": "0.1.48",
+  "version": "0.1.49",
   "private": true,
   "license": "UNLICENSED",
   "engines": {
@@ -10,10 +10,11 @@
   "main": "electron/main.js",
   "scripts": {
     "start": "electron .",
-    "test": "npm run check",
+    "test": "npm run check && npm run test:asr",
     "test:e2e": "npm run smoke:pdf-reader",
-    "check": "node --check electron/main.js && node --check electron/preload.js && node --check app.js && node --check pdf-reader.js && node --check library-ai.js && node --check rag.js && node --check vector-store.js && node --check agent.js && node --check scripts/evaluation/core.js && node --check scripts/evaluation/embed.js && node --check scripts/evaluation/extract-pdf.js && node --check scripts/evaluation/audit.js && node --check scripts/evaluate-rag.js && node scripts/check-pdf-reader.js && node scripts/check-library-ai.js && node scripts/check-rag.js && node scripts/check-vector-store.js && node scripts/check-agent.js && node scripts/check-evaluation.js && node scripts/check-evaluation-embed.js",
+    "check": "node --check electron/main.js && node --check electron/preload.js && node --check app.js && node --check pdf-reader.js && node --check library-ai.js && node --check rag.js && node --check vector-store.js && node --check agent-tools.js && node --check agent.js && node --check scripts/evaluation/core.js && node --check scripts/evaluation/embed.js && node --check scripts/evaluation/extract-pdf.js && node --check scripts/evaluation/audit.js && node --check scripts/evaluate-rag.js && node scripts/check-pdf-reader.js && node scripts/check-library-ai.js && node scripts/check-rag.js && node scripts/check-vector-store.js && node scripts/check-agent.js && node scripts/check-evaluation.js && node scripts/check-evaluation-embed.js",
     "eval:rag": "node scripts/evaluate-rag.js",
+    "test:asr": "node scripts/check-asr.js",
     "smoke:pdf-reader": "node scripts/smoke-pdf-reader.e2e.js",
     "dist": "node scripts/build-portable.js"
   },
@@ -37,6 +38,7 @@
       "library-ai.js",
       "rag.js",
       "vector-store.js",
+      "agent-tools.js",
       "agent.js",
       "electron/**/*",
       "node_modules/**/*",

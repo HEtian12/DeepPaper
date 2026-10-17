@@ -30,12 +30,15 @@ function writeMinimalPdf(filePath) {
 
 async function main() {
   assert.equal(endpointUrl("https://example.org/v1"), "https://example.org/v1/embeddings");
+  assert.equal(endpointUrl("http://127.0.0.1:11434", "ollama"), "http://127.0.0.1:11434/api/embed");
+  assert.throws(() => endpointUrl("https://example.org", "ollama"), /local HTTP/);
   assert.throws(() => endpointUrl("http://example.org/v1"), /HTTPS/);
   const { corpus, questions } = syntheticFixture();
   const prepared = prepare(corpus, questions, { split: "all" });
   const inputs = embeddingInputs(prepared);
   const out = fs.mkdtempSync(path.join(os.tmpdir(), "deeppaper-eval-embed-"));
   const seen = [];
+  const localSeen = [];
   const fetchImpl = async (_url, init) => {
     assert.equal(init.headers.Authorization, "Bearer test-key");
     const body = JSON.parse(init.body);
@@ -48,6 +51,21 @@ async function main() {
   const args = {
     inputs, out, endpoint: "https://example.org/v1", key: "test-key", model: "mock-v1",
     provider: "mock", revision: "v1", kind: "synthetic", maxInputs: 1, batchSize: 1, fetchImpl
+  };
+  const localArgs = {
+    inputs, out: path.join(out, "ollama"), endpoint: "http://127.0.0.1:11434", key: "",
+    model: "qwen3-embedding:0.6b", provider: "ollama", revision: "test-digest", kind: "synthetic",
+    maxInputs: 100, batchSize: 3,
+    fetchImpl: async (url, init) => {
+      assert.equal(url, "http://127.0.0.1:11434/api/embed");
+      assert.equal(init.headers.Authorization, undefined);
+      const body = JSON.parse(init.body);
+      localSeen.push(body.input);
+      return {
+        ok: true,
+        json: async () => ({ model: body.model, embeddings: body.input.map(() => [0.25, 0.75]) })
+      };
+    }
   };
   try {
     const pdfPath = path.join(out, "local.pdf");
@@ -87,6 +105,13 @@ async function main() {
     assert.equal(cache.generation.totalTokens, inputs.entries.length * 4);
     assert.equal(validateVectors(cache, prepared, "synthetic").queries.size, 4);
     await assert.rejects(embedInputs({ ...args, model: "different" }), /different model/);
+    const local = await embedInputs(localArgs);
+    assert.equal(local.remaining, 0);
+    assert(localSeen.length > 1);
+    assert(localSeen.every(Array.isArray), "Ollama evaluation should use array-input batches");
+    const localCache = JSON.parse(fs.readFileSync(local.cachePath, "utf8"));
+    assert.equal(localCache.model.provider, "ollama");
+    assert.equal(localCache.model.dimensions, 2);
   } finally {
     if (path.resolve(out).startsWith(`${path.resolve(os.tmpdir())}${path.sep}`)) fs.rmSync(out, { recursive: true, force: true });
   }

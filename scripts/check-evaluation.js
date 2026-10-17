@@ -4,7 +4,7 @@ const {
   prepare, embeddingInputs, validateDataset, validateVectors, scoreResults,
   runEvaluation, evidenceMatches, markdownReport
 } = require("./evaluation/core.js");
-const { splitTextIntoChunks, buildPassageIndex } = require("../rag.js");
+const { splitTextIntoChunks, buildPassageIndex, readPassages } = require("../rag.js");
 
 const { corpus, questions, vectors } = syntheticFixture();
 const prepared = prepare(corpus, questions, { split: "all", k: 2, repeats: 2 });
@@ -58,6 +58,22 @@ const noAnswer = scoreResults(questions.questions[3], [hit], 1);
 assert.equal(noAnswer.recallAtK, null);
 assert.equal(noAnswer.returnedCount, 1);
 
+const spanningText = `${"x".repeat(310)}EVIDENCE_SPANS_CHUNKS${"y".repeat(300)}`;
+const spanningIndex = buildPassageIndex([{
+  id: "split-evidence", title: "Chunk boundary fixture", text: spanningText,
+  pageCount: 1, pageTextOffsets: [{ pageNumber: 1, start: 0, end: spanningText.length }], keywords: []
+}], { target: 320, overlap: 0, cleaning: false });
+const spanningEvidence = { id: "split-e1", paperId: "split-evidence", pageNumber: 1, quote: "EVIDENCE_SPANS_CHUNKS", relevance: 2 };
+const spanningQuestion = { answerable: true, evidence: [spanningEvidence] };
+const strictPassage = spanningIndex.passages[0];
+assert(!evidenceMatches(strictPassage, spanningEvidence), "strict metric should require a quote within one chunk");
+assert(readPassages(spanningIndex, [strictPassage.passageId], 1)[0].context.replace(/\s+/gu, "").includes(spanningEvidence.quote), "reader context should recover evidence crossing an adjacent chunk boundary");
+const spanningScores = scoreResults(spanningQuestion, [strictPassage], 1, spanningIndex);
+assert.equal(spanningScores.recallAtK, 0);
+assert.equal(spanningScores.contextRecallAtK, 1);
+assert.deepEqual(spanningScores.missedContextEvidenceIds, []);
+assert.equal(scoreResults({ answerable: true, evidence: [{ ...spanningEvidence, pageNumber: 2 }] }, [strictPassage], 1, spanningIndex).contextRecallAtK, 0, "context evidence must not cross source pages");
+
 const longText = "A sentence about semantic ranking and citations. ".repeat(35);
 const withoutOverlap = splitTextIntoChunks(longText, { target: 400, overlap: 0 });
 const withOverlap = splitTextIntoChunks(longText, { target: 400, overlap: 100 });
@@ -85,6 +101,7 @@ assert.equal(report.runs.length, 3);
 assert.equal(report.counts.questions, 4);
 assert.equal(report.externalRequests, 0);
 assert.equal(report.runs[0].metrics.falseSufficientEvidenceRate, null);
+assert(Number.isFinite(report.runs[0].metrics.contextRecallAtK));
 assert(report.runs.every((run) => run.rows.length === 4));
 assert(markdownReport(report).includes("synthetic evaluator check"));
 

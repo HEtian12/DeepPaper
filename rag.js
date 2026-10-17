@@ -4,6 +4,7 @@
   const DEFAULT_TARGET = 820;
   const DEFAULT_OVERLAP = 120;
   const EDGE_LINE_COUNT = 3;
+  const passageCjkMetadataCache = new WeakMap();
   const PRESERVE_HYPHEN_RIGHT = new Set([
     "audio", "aware", "based", "centric", "class", "decoder", "dependent", "domain", "driven",
     "encoder", "free", "frequency", "generation", "guided", "image", "language", "learning", "level",
@@ -162,6 +163,24 @@
 
   function normalizeSearchText(value) {
     return normalizeText(value).toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
+  }
+
+  function cjkNgrams(value, size = 3) {
+    const characters = [...String(value || "").replace(/[^\u3400-\u9fff]/gu, "")];
+    const grams = new Set();
+    for (let index = 0; index <= characters.length - size; index += 1) {
+      grams.add(characters.slice(index, index + size).join(""));
+    }
+    return grams;
+  }
+
+  function passageCjkMetadata(passage) {
+    let metadata = passageCjkMetadataCache.get(passage);
+    if (metadata === undefined) {
+      metadata = `${passage.title} ${passage.keywords.join(" ")}`.replace(/[^\u3400-\u9fff]/gu, "");
+      passageCjkMetadataCache.set(passage, metadata);
+    }
+    return metadata;
   }
 
   function paperTitle(paper) {
@@ -325,30 +344,47 @@
   function searchPassages(index, query, limit = 12, helpers = {}) {
     const passages = Array.isArray(index?.passages) ? index.passages : [];
     const extracted = typeof helpers.extractTerms === "function" ? helpers.extractTerms(query) : fallbackTerms(query);
-    const terms = extracted.length ? extracted : fallbackTerms(query);
+    const latinTokens = String(query || "").match(/\b[A-Za-z][A-Za-z0-9-]{1,}\b/gu) || [];
+    const terms = [...new Set([...(extracted.length ? extracted : fallbackTerms(query)), ...latinTokens])];
     if (!terms.length) return [];
     const normalizedQuery = normalizeSearchText(query);
-    const scored = passages.map((passage) => {
-      const passageText = normalizeSearchText(passage.text);
-      const titleText = normalizeSearchText(passage.title);
-      const keywordText = normalizeSearchText(passage.keywords.join(" "));
+    const queryGrams = cjkNgrams(normalizedQuery.replace(/(?:如何|怎样|为什么|为何|哪篇|哪些|哪个|什么|怎么|分别|是否|可以|能够|通过|使用|利用|提出|结合|处理|解决|进行|做到|情况下|是什么|有哪些|的|了|在|把|对|与|和|及|中)/gu, ""));
+    const searchable = passages.map((passage) => ({
+      passage,
+      text: normalizeSearchText(passage.text),
+      title: normalizeSearchText(passage.title),
+      keywords: normalizeSearchText(passage.keywords.join(" "))
+    }));
+    const termMatchers = terms.map((term) => {
+      const aliases = typeof helpers.termAliases === "function" ? helpers.termAliases(term) : [term];
+      const needles = [...new Set(aliases.map(normalizeSearchText).filter(Boolean))];
+      const documentFrequency = searchable.reduce((count, item) => count + Number(needles.some((needle) =>
+        item.text.includes(needle) || item.title.includes(needle) || item.keywords.includes(needle))), 0);
+      const idfWeight = Math.max(0.5, Math.min(2.5, Math.log((passages.length + 1) / (documentFrequency + 1))));
+      return { term, needles, idfWeight };
+    });
+    const scored = searchable.map(({ passage, text: passageText, title: titleText, keywords: keywordText }) => {
       const matchedTerms = [];
       let score = 0;
-      terms.forEach((term) => {
-        const aliases = typeof helpers.termAliases === "function" ? helpers.termAliases(term) : [term];
-        let matched = false;
-        aliases.forEach((alias) => {
-          const needle = normalizeSearchText(alias);
-          if (!needle) return;
-          if (passageText.includes(needle)) {
-            score += 12;
-            matched = true;
-          }
-          if (keywordText.includes(needle)) score += 9;
-          if (titleText.includes(needle)) score += 7;
-        });
-        if (matched) matchedTerms.push(term);
+      termMatchers.forEach(({ term, needles, idfWeight }) => {
+        const bodyMatch = needles.some((needle) => passageText.includes(needle));
+        const keywordMatch = needles.some((needle) => keywordText.includes(needle));
+        const titleMatch = needles.some((needle) => titleText.includes(needle));
+        if (bodyMatch) {
+          score += 12 * idfWeight;
+          matchedTerms.push(term);
+        }
+        if (keywordMatch) score += 9 * idfWeight;
+        if (titleMatch) score += 7 * idfWeight;
       });
+      if (queryGrams.size) {
+        const metadataText = passageCjkMetadata(passage);
+        let overlap = 0;
+        queryGrams.forEach((gram) => {
+          if (metadataText.includes(gram)) overlap += 1;
+        });
+        score += Math.min(30, overlap * 3);
+      }
       if (normalizedQuery && passageText.includes(normalizedQuery)) score += 18;
       if (matchedTerms.length === terms.length && terms.length > 1) score += 22;
       return { ...passage, score, matchedTerms: [...new Set(matchedTerms)] };

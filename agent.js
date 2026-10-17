@@ -1,4 +1,7 @@
 (function initDeepPaperAgent(root) {
+  const toolValidation = typeof module !== "undefined" && module.exports
+    ? require("./agent-tools.js")
+    : root.deepPaperAgentTools;
   const STORAGE_KEY = "deeppaper.agent.v1";
   const MAX_TASKS = 12;
   const MAX_STEPS = 6;
@@ -76,8 +79,9 @@
   }
 
   async function executeLocalTool(tool, paperList, retrieveCandidates, ragApi = null, retrievalContext = {}) {
-    const name = String(tool?.name || "");
-    const args = tool?.arguments && typeof tool.arguments === "object" ? tool.arguments : {};
+    const validation = toolValidation?.validateToolCall(tool);
+    if (!validation?.ok) return { ok: false, error: validation?.error || "Agent tool schema validator is unavailable." };
+    const { name, arguments: args } = validation.tool;
     const library = Array.isArray(paperList) ? paperList : [];
 
     if (name === "search_library") {
@@ -264,12 +268,26 @@
   let activeRunToken = 0;
   let semanticIndexToken = 0;
   let semanticIndexBusy = false;
+  let mediaRecorder = null;
+  let recordingStream = null;
+  let recordingChunks = [];
+  let recordingTimer = null;
+  let asrBusy = false;
+  const ASR_ENDPOINT_KEY = "deeppaper.asr.endpoint";
+  const DEFAULT_ASR_ENDPOINT = "http://127.0.0.1:8080/inference";
 
   function loadState() {
     try {
       const value = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
       const tasks = (Array.isArray(value.tasks) ? value.tasks : []).slice(-MAX_TASKS).map((task) => task?.status === "running"
-        ? { ...task, status: "stopped", transcript: [], evidence: [] }
+        ? {
+          ...task,
+          status: "stopped",
+          trace: (task.trace || []).map((step) => step.status === "running" || step.status === "verifying"
+            ? { ...step, status: "interrupted", error: "应用关闭时步骤未完成" }
+            : step),
+          events: [...(task.events || []), { type: "notice", text: "应用关闭时任务中断，可从已保存步骤重试。" }]
+        }
         : task);
       const requestedActiveId = value.activeTaskId;
       return {
@@ -335,8 +353,16 @@
           <button type="button" data-agent-example="整理与多模态抑郁识别相关的论文，并提出一个合集方案">整理为合集</button>
         </div>
         <textarea id="agentGoalInput" rows="4" placeholder="描述一个任务。Enter 执行，Shift + Enter 换行"></textarea>
+        <details class="agent-asr-settings">
+          <summary>本地语音识别设置</summary>
+          <label for="agentAsrEndpoint">Whisper 本机服务地址</label>
+          <input id="agentAsrEndpoint" type="url" spellcheck="false">
+          <span>录音仅发送至本机服务；转写完成后可编辑，不会自动执行。</span>
+        </details>
+        <div id="agentAsrStatus" class="agent-asr-status" aria-live="polite"></div>
         <div class="agent-composer-actions">
           <button id="agentStopBtn" class="secondary hidden" type="button">停止</button>
+          <button id="agentRecordBtn" class="secondary" type="button" title="开始语音录入">开始录音</button>
           <button id="agentRunBtn" class="primary" type="button">开始执行</button>
         </div>
       </div>
@@ -349,6 +375,10 @@
     panel.querySelector("#agentClearBtn").addEventListener("click", clearTasks);
     panel.querySelector("#agentRunBtn").addEventListener("click", startTask);
     panel.querySelector("#agentStopBtn").addEventListener("click", stopTask);
+    const asrEndpointInput = panel.querySelector("#agentAsrEndpoint");
+    asrEndpointInput.value = localStorage.getItem(ASR_ENDPOINT_KEY) || DEFAULT_ASR_ENDPOINT;
+    asrEndpointInput.addEventListener("change", () => localStorage.setItem(ASR_ENDPOINT_KEY, asrEndpointInput.value.trim()));
+    panel.querySelector("#agentRecordBtn").addEventListener("click", toggleRecording);
     panel.querySelector("#agentBuildIndexBtn").addEventListener("click", buildSemanticIndex);
     panel.querySelector("#agentGoalInput").addEventListener("keydown", (event) => {
       if (event.key === "Enter" && !event.shiftKey) {
@@ -375,7 +405,94 @@
   }
 
   function closePanel() {
+    stopRecording(true);
     document.querySelector("#deepPaperAgentPanel")?.classList.add("hidden");
+  }
+
+  function setAsrStatus(message, isError = false) {
+    const status = document.querySelector("#agentAsrStatus");
+    if (!status) return;
+    status.textContent = message;
+    status.classList.toggle("error", isError);
+  }
+
+  function releaseMicrophone() {
+    clearTimeout(recordingTimer);
+    recordingTimer = null;
+    recordingStream?.getTracks().forEach((track) => track.stop());
+    recordingStream = null;
+  }
+
+  function stopRecording(discard = false) {
+    if (mediaRecorder?.state === "recording") {
+      if (discard) mediaRecorder.onstop = null;
+      mediaRecorder.stop();
+    }
+    releaseMicrophone();
+    if (discard) {
+      mediaRecorder = null;
+      recordingChunks = [];
+      const button = document.querySelector("#agentRecordBtn");
+      if (button) button.textContent = "开始录音";
+    }
+  }
+
+  async function toggleRecording() {
+    const button = document.querySelector("#agentRecordBtn");
+    const input = document.querySelector("#agentGoalInput");
+    if (mediaRecorder?.state === "recording") {
+      mediaRecorder.stop();
+      return;
+    }
+    if (asrBusy) return;
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      setAsrStatus("当前环境不支持麦克风录音。", true);
+      return;
+    }
+    const endpoint = document.querySelector("#agentAsrEndpoint")?.value.trim() || DEFAULT_ASR_ENDPOINT;
+    try {
+      const url = new URL(endpoint);
+      if (url.protocol !== "http:" || !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)) throw new Error("为保护隐私，语音识别地址必须是本机 HTTP 服务。");
+      localStorage.setItem(ASR_ENDPOINT_KEY, endpoint);
+      recordingStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+      const options = {};
+      if (MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) options.mimeType = "audio/webm;codecs=opus";
+      mediaRecorder = new MediaRecorder(recordingStream, options);
+      recordingChunks = [];
+      mediaRecorder.ondataavailable = (event) => { if (event.data?.size) recordingChunks.push(event.data); };
+      mediaRecorder.onstop = async () => {
+        const recorder = mediaRecorder;
+        mediaRecorder = null;
+        releaseMicrophone();
+        if (button) { button.disabled = true; button.textContent = "正在识别…"; }
+        asrBusy = true;
+        try {
+          const blob = new Blob(recordingChunks, { type: recorder?.mimeType || "audio/webm" });
+          recordingChunks = [];
+          if (!blob.size) throw new Error("没有录到音频，请重试。");
+          if (blob.size > 25 * 1024 * 1024) throw new Error("录音超过 25 MB，请缩短后重试。");
+          const audio = new Uint8Array(await blob.arrayBuffer());
+          const result = await root.deepPaper.transcribeAudio({ endpoint, audio, mimeType: blob.type || "audio/webm" });
+          if (!result?.ok) throw new Error(result?.error || "语音识别失败。");
+          input.value = [input.value.trim(), result.text].filter(Boolean).join(" ");
+          input.focus();
+          setAsrStatus("识别完成，请检查或编辑文字后再执行。");
+        } catch (error) {
+          setAsrStatus(error.message, true);
+        } finally {
+          asrBusy = false;
+          if (button) { button.disabled = false; button.textContent = "开始录音"; }
+        }
+      };
+      mediaRecorder.start(250);
+      if (button) button.textContent = "停止录音";
+      setAsrStatus("正在录音…再次点击结束，最长 2 分钟。");
+      recordingTimer = setTimeout(() => { if (mediaRecorder?.state === "recording") mediaRecorder.stop(); }, 120_000);
+    } catch (error) {
+      releaseMicrophone();
+      setAsrStatus(error.name === "NotAllowedError" ? "麦克风权限未授予，请允许 DeepPaper 使用麦克风。" : error.message, true);
+      if (button) button.textContent = "开始录音";
+    }
   }
 
   function newTask() {
@@ -398,8 +515,12 @@
     const task = activeTask();
     if (task?.status === "running") {
       task.status = "stopped";
-      task.transcript = [];
-      task.evidence = [];
+      const currentStep = task.trace?.at(-1);
+      if (currentStep?.status === "running") {
+        currentStep.status = "cancelled";
+        currentStep.durationMs = Math.max(0, Date.now() - new Date(currentStep.startedAt).getTime());
+      }
+      if (task.runId) root.deepPaper?.cancelAgentRun?.(task.runId).catch(() => {});
       task.events.push({ type: "notice", text: "任务已停止。" });
       saveState();
     }
@@ -428,6 +549,8 @@
     if (confirmButton) applyProposal(confirmButton.dataset.agentConfirmProposal);
     const rejectButton = event.target.closest("[data-agent-reject-proposal]");
     if (rejectButton) rejectProposal(rejectButton.dataset.agentRejectProposal);
+    const retryButton = event.target.closest("[data-agent-retry]");
+    if (retryButton) startTask(agentState.tasks.find((task) => task.id === retryButton.dataset.agentRetry));
   }
 
   function activeEmbeddingConfig() {
@@ -438,7 +561,7 @@
     return Boolean(config?.embeddingEnabled
       && config?.embeddingBaseUrl
       && config?.embeddingModel
-      && (config?.embeddingApiKey || config?.apiKey));
+      && (config?.embeddingProvider === "ollama" || config?.embeddingApiKey || config?.apiKey));
   }
 
   function cleaningSummary(index) {
@@ -454,6 +577,7 @@
   async function createEmbeddingVectors(texts, config = activeEmbeddingConfig()) {
     if (typeof root.deepPaper?.createEmbeddings !== "function") return { ok: false, error: "Embedding IPC 未加载。" };
     return root.deepPaper.createEmbeddings({
+      embeddingProvider: config.embeddingProvider,
       embeddingBaseUrl: config.embeddingBaseUrl,
       embeddingApiKey: config.embeddingApiKey,
       apiKey: config.apiKey,
@@ -559,9 +683,9 @@
     }
   }
 
-  async function startTask() {
+  async function startTask(resumeTask = null) {
     const input = document.querySelector("#agentGoalInput");
-    const goal = input?.value.trim();
+    const goal = resumeTask?.goal || input?.value.trim();
     if (!goal) return;
     if (typeof papers === "undefined" || !papers.length) {
       if (typeof setStatus === "function") setStatus("文献库为空，无法执行 Agent 任务。", true);
@@ -573,27 +697,48 @@
       return;
     }
 
-    const task = {
+    const task = resumeTask || {
       id: crypto.randomUUID(),
       goal,
       status: "running",
       createdAt: new Date().toISOString(),
       events: [{ type: "goal", text: goal }],
+      trace: [],
+      stepsCompleted: 0,
       transcript: [],
       evidence: [],
       final: null,
       proposal: null
     };
-    agentState.tasks.push(task);
+    task.status = "running";
+    task.trace ||= [];
+    task.transcript ||= [];
+    task.evidence ||= [];
+    task.stepsCompleted ||= 0;
+    task.final = null;
+    if (resumeTask) task.events.push({ type: "notice", text: "从最近一次已保存状态继续重试。" });
+    else agentState.tasks.push(task);
     agentState.activeTaskId = task.id;
-    input.value = "";
+    task.runId = crypto.randomUUID();
+    if (!resumeTask) input.value = "";
     saveState();
     setRunning(true);
     renderAgent();
     const token = ++activeRunToken;
 
-    for (let stepIndex = 0; stepIndex < MAX_STEPS; stepIndex += 1) {
+    for (let stepIndex = task.stepsCompleted; stepIndex < MAX_STEPS; stepIndex += 1) {
       if (token !== activeRunToken) return;
+      const traceStep = {
+        step: stepIndex + 1,
+        status: "running",
+        startedAt: new Date().toISOString(),
+        tool: null,
+        arguments: null,
+        summary: "等待模型决策"
+      };
+      task.trace.push(traceStep);
+      task.trace = task.trace.slice(-30);
+      saveState();
       task.events.push({ type: "thinking", text: `正在决定第 ${stepIndex + 1} 步...` });
       renderAgent();
 
@@ -604,12 +749,16 @@
           apiKey: config.apiKey,
           model: config.model,
           goal,
-          transcript: task.transcript
+          transcript: task.transcript,
+          runId: task.runId
         });
       } catch (error) {
         response = { ok: false, error: error.message };
       }
       task.events = task.events.filter((item) => item.type !== "thinking");
+      traceStep.durationMs = Math.max(0, Date.now() - new Date(traceStep.startedAt).getTime());
+      traceStep.status = response?.ok ? "running" : response?.cancelled ? "cancelled" : "failed";
+      traceStep.error = response?.ok ? "" : response?.error || "模型步骤失败";
       if (token !== activeRunToken) return;
       if (!response?.ok) {
         task.status = "failed";
@@ -620,6 +769,9 @@
 
       const step = response.step;
       if (step.status === "final") {
+        traceStep.tool = "final_answer";
+        traceStep.summary = step.decisionSummary || "形成最终回答";
+        traceStep.status = "verifying";
         const citations = validateCitations(step.final?.citations, task);
         task.final = {
           answer: step.final?.answer || step.decisionSummary || "任务已完成。",
@@ -635,6 +787,7 @@
               provider: config.provider,
               apiKey: config.apiKey,
               model: config.model,
+              runId: task.runId,
               goal,
               answer: task.final.answer,
               citations: citations.map((citation) => ({
@@ -650,6 +803,9 @@
           task.final.verification = { verdict: "unchecked", score: null, summary: error.message, issues: [], supportedPassageIds: [] };
         }
         if (token !== activeRunToken) return;
+        traceStep.status = "completed";
+        traceStep.durationMs = Math.max(0, Date.now() - new Date(traceStep.startedAt).getTime());
+        traceStep.verification = task.final.verification?.verdict || "unchecked";
         task.events = task.events.filter((item) => item.type !== "thinking");
         task.status = "completed";
         task.events.push({ type: "final", text: step.decisionSummary || "已形成结论。" });
@@ -658,6 +814,9 @@
       }
 
       const tool = step.tool;
+      traceStep.tool = tool.name;
+      traceStep.arguments = tool.arguments;
+      traceStep.summary = step.decisionSummary || TOOL_LABELS[tool.name] || tool.name;
       task.events.push({
         type: "tool",
         tool: tool.name,
@@ -670,10 +829,13 @@
         summary: step.decisionSummary,
         arguments: tool.arguments
       });
+      saveState();
 
       const retrieval = root.deepPaperLibraryAi?.retrieveCandidates;
       if (typeof retrieval !== "function") {
         task.status = "failed";
+        traceStep.status = "failed";
+        traceStep.error = "全库检索模块未加载";
         task.events.push({ type: "error", text: "全库检索模块未加载。" });
         finishRun(task);
         return;
@@ -694,6 +856,14 @@
         toolResult = { ok: false, error: `工具执行失败：${error.message}` };
       }
       if (toolResult.pageMapsUpdated && typeof saveLibrary === "function") saveLibrary();
+      traceStep.status = toolResult.ok ? "completed" : "failed";
+      traceStep.resultSummary = toolResult.summary || toolResult.error || "工具已返回";
+      traceStep.paperIds = [...new Set([
+        ...(toolResult.papers || []).map((paper) => paper.paper_id),
+        ...(toolResult.passages || []).map((passage) => passage.paper_id)
+      ])].slice(0, 30);
+      traceStep.passageIds = (toolResult.passages || []).map((passage) => passage.passage_id).slice(0, 30);
+      traceStep.durationMs = Math.max(0, Date.now() - new Date(traceStep.startedAt).getTime());
       task.events.push({
         type: toolResult.ok ? "tool-result" : "error",
         tool: tool.name,
@@ -727,9 +897,10 @@
         type: "tool_result",
         tool: tool.name,
         summary: toolResult.summary || toolResult.error,
-        result: toolResult
+        result: JSON.stringify(toolResult).slice(0, 24000)
       });
       if (toolResult.proposal) task.proposal = toolResult.proposal;
+      task.stepsCompleted = stepIndex + 1;
       saveState();
       renderAgent();
     }
@@ -740,8 +911,14 @@
   }
 
   function finishRun(task) {
-    task.transcript = [];
-    task.evidence = [];
+    task.runId = null;
+    if (task.status === "completed") {
+      task.transcript = [];
+      task.evidence = [];
+    } else {
+      task.transcript = (task.transcript || []).slice(-12);
+      task.evidence = (task.evidence || []).slice(-40);
+    }
     saveState();
     setRunning(false);
     renderAgent();
@@ -804,6 +981,8 @@
       <article class="agent-task">
         <header><span class="agent-status ${escapeHtml(task.status)}">${statusLabel(task.status)}</span><time>${escapeHtml(new Date(task.createdAt).toLocaleString())}</time></header>
         <h3>${escapeHtml(task.goal)}</h3>
+        ${task.trace?.length ? renderExecutionTrace(task.trace) : ""}
+        ${["failed", "stopped"].includes(task.status) && (task.stepsCompleted || 0) < MAX_STEPS ? `<div class="agent-task-actions"><button class="secondary small-btn" type="button" data-agent-retry="${escapeHtml(task.id)}">从已保存步骤重试</button></div>` : ""}
         <div class="agent-timeline">${task.events.map(renderEvent).join("")}</div>
         ${task.final ? renderFinal(task.final) : ""}
         ${task.proposal ? renderProposal(task.id, task.proposal) : ""}
@@ -825,6 +1004,16 @@
       return paper ? `<button type="button" data-agent-paper="${escapeHtml(id)}">${escapeHtml(paperTitle(paper))}</button>` : "";
     }).join("");
     return `<div class="agent-event ${escapeHtml(event.type)}"><span>${escapeHtml(label)}</span><div><p>${escapeHtml(event.text || "")}</p>${paperLinks ? `<div class="agent-event-papers">${paperLinks}</div>` : ""}</div></div>`;
+  }
+
+  function renderExecutionTrace(trace) {
+    return `<details class="agent-execution-trace"><summary>执行记录（${trace.length} 步）</summary><ol>${trace.map((step) => {
+      const args = step.arguments ? `<pre>${escapeHtml(JSON.stringify(step.arguments, null, 2))}</pre>` : "";
+      const result = step.resultSummary ? `<p>${escapeHtml(step.resultSummary)}</p>` : "";
+      const failure = step.error ? `<p class="agent-trace-error">${escapeHtml(step.error)}</p>` : "";
+      const duration = Number.isFinite(step.durationMs) ? `<small>${Math.round(step.durationMs)} ms</small>` : "";
+      return `<li class="agent-trace-step ${escapeHtml(step.status || "")}"><div><strong>第 ${Number(step.step) || 0} 步 · ${escapeHtml(TOOL_LABELS[step.tool] || step.tool || "模型决策")}</strong><span>${escapeHtml(step.status || "未知")}</span>${duration}</div><p>${escapeHtml(step.summary || "")}</p>${args}${result}${failure}</li>`;
+    }).join("")}</ol></details>`;
   }
 
   function renderFinal(final) {

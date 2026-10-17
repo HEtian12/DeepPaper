@@ -16,6 +16,7 @@ function usage() {
     "  node scripts/evaluate-rag.js import --library <DeepPaper export.json> --out <private directory> [--rebuild-pages]",
     "  node scripts/evaluate-rag.js inputs --corpus <corpus.json> --questions <questions.json> --out <private directory> [index options]",
     "  node scripts/evaluate-rag.js embed --inputs <embedding-inputs.json> --out <private directory> --endpoint <url> --model <name> --provider <name> --revision <version> --kind real --max-inputs <n> [--batch 1..32]",
+    "    Ollama local example: --endpoint http://127.0.0.1:11434 --model qwen3-embedding:0.6b --provider ollama --revision <ollama-model-digest> (no API key)",
     "  node scripts/evaluate-rag.js run --corpus <corpus.json> --questions <questions.json> --out <private directory> [--vectors <vectors.json>] [index options]",
     "  node scripts/evaluate-rag.js demo --out <directory>",
     "Index options: --mode keyword|vector|hybrid|all --split development|test|all --k 1..24 --target 320..10000 --overlap 0..target/3 --cleaning on|off --repeats 1..100",
@@ -140,8 +141,8 @@ async function main(argv) {
   const { command, args } = parseArgs(argv);
   const out = path.resolve(args["--out"]);
   if (command === "embed") {
-    const key = process.env.DEEPPAPER_EVAL_EMBEDDING_KEY;
-    if (!key) throw new Error("Set DEEPPAPER_EVAL_EMBEDDING_KEY in the environment; do not pass API keys on the command line");
+    const key = process.env.DEEPPAPER_EVAL_EMBEDDING_KEY || "";
+    if (args["--provider"] !== "ollama" && !key) throw new Error("Set DEEPPAPER_EVAL_EMBEDDING_KEY in the environment; do not pass API keys on the command line");
     const integer = (name, fallback) => {
       const value = args[name] ?? String(fallback);
       if (!/^\d+$/.test(value)) throw new Error(`${name} must be an integer`);

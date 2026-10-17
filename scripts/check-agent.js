@@ -2,6 +2,7 @@ const assert = require("assert");
 const fs = require("fs");
 const path = require("path");
 const { executeLocalTool, uniqueIds } = require("../agent.js");
+const { validateToolCall, normalizeReadPaperIds } = require("../agent-tools.js");
 const { retrieveLibraryCandidates, extractLibraryAiTerms, termAliases } = require("../library-ai.js");
 const rag = require("../rag.js");
 
@@ -13,15 +14,46 @@ const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), 
 
 assert(indexHtml.indexOf("library-ai.js") < indexHtml.indexOf("agent.js"), "Agent must load after library retrieval helpers");
 assert(indexHtml.indexOf("vector-store.js") < indexHtml.indexOf("agent.js"), "Agent must load after vector storage");
+assert(indexHtml.indexOf("agent-tools.js") < indexHtml.indexOf("agent.js"), "Agent tool schemas must load before the renderer Agent");
 assert(preloadSource.includes("runAgentStep"), "preload must expose the Agent step IPC");
+assert(preloadSource.includes("cancelAgentRun"), "preload must expose Agent cancellation");
 assert(preloadSource.includes("createEmbeddings"), "preload must expose the Embedding IPC");
 assert(preloadSource.includes("verifyAgentAnswer"), "preload must expose the verification IPC");
 assert(mainSource.includes('ipcMain.handle("agent:step"'), "main process must handle Agent steps");
 assert(mainSource.includes('ipcMain.handle("embeddings:create"'), "main process must handle embeddings");
+assert(mainSource.includes('body: JSON.stringify({ model, input: values })'), "local Ollama embeddings must use the /api/embed request format");
 assert(mainSource.includes("function sleep(ms)"), "main process must define the retry delay helper");
 assert(mainSource.includes('ipcMain.handle("agent:verify"'), "main process must verify evidence");
 assert(packageJson.build.files.includes("agent.js"), "Agent renderer must be included in packaged builds");
 assert(packageJson.build.files.includes("vector-store.js"), "Vector storage must be included in packaged builds");
+assert(packageJson.build.files.includes("agent-tools.js"), "Agent tool schemas must be included in packaged builds");
+assert(mainSource.includes("validateToolCall(value.tool)"), "main process must validate Agent tool calls before returning them");
+assert(mainSource.includes('ipcMain.handle("agent:cancel"'), "main process must handle Agent cancellation");
+assert(mainSource.includes("signal: controller.signal"), "Agent model requests must accept cancellation signals");
+const agentSource = fs.readFileSync(path.join(root, "agent.js"), "utf8");
+assert(agentSource.includes("renderExecutionTrace"), "Agent UI must expose execution traces");
+assert(agentSource.includes("data-agent-retry"), "Agent UI must expose failed-task retry");
+assert(agentSource.includes("task.stepsCompleted"), "Agent must resume from its completed-step checkpoint");
+
+assert.equal(validateToolCall({ name: "search_library", arguments: { query: "long tail", limit: 5 } }).ok, true);
+assert.equal(validateToolCall({ name: "search_library", arguments: { query: "x", limit: 31 } }).ok, false);
+assert.equal(validateToolCall({ name: "search_library", arguments: { query: "x", debug: true } }).ok, false);
+assert.equal(validateToolCall({ name: "read_papers", arguments: { paper_ids: ["paper-a"], sections: ["unknown"] } }).ok, false);
+assert.equal(validateToolCall({ name: "read_papers", arguments: { paper_ids: Array.from({ length: 7 }, (_, i) => `paper-${i}`), sections: ["method"] } }).ok, false);
+assert.equal(validateToolCall({ name: "compare_papers", arguments: { paper_ids: ["paper-a", "paper-a"], focus: "method" } }).ok, false);
+assert.equal(validateToolCall({ name: "not_a_tool", arguments: {} }).ok, false);
+const searchTranscript = [{ type: "tool_result", tool: "search_library", result: JSON.stringify({ papers: [
+  { paper_id: "paper-a", title: "Paper A" },
+  { paper_id: "paper-b", title: "Paper B" },
+  { paper_id: "paper-c", title: "Paper C" },
+  { paper_id: "paper-d", title: "Paper D" },
+  { paper_id: "paper-e", title: "Paper E" },
+  { paper_id: "paper-f", title: "Paper F" },
+  { paper_id: "paper-g", title: "Paper G" }
+] }) }];
+const normalizedRead = normalizeReadPaperIds({ name: "read_papers", arguments: { paper_ids: ["Paper A", "paper-b", "Paper C", "Paper D", "Paper E", "Paper F", "Paper G", "bogus"], sections: ["method"] } }, searchTranscript);
+assert.deepEqual(normalizedRead.arguments.paper_ids, ["paper-a", "paper-b", "paper-c", "paper-d", "paper-e", "paper-f"]);
+assert.equal(validateToolCall(normalizedRead).ok, true);
 
 async function run() {
 const papers = [
@@ -58,6 +90,8 @@ const retrieve = (library, query, limit) => retrieveLibraryCandidates(library, q
 const search = await executeLocalTool({ name: "search_library", arguments: { query: "长尾识别，知识蒸馏", limit: 10 } }, papers, retrieve);
 assert.equal(search.ok, true);
 assert.equal(search.papers[0].paper_id, "paper-a");
+const rejectedSearch = await executeLocalTool({ name: "search_library", arguments: { query: "x", limit: 99 } }, papers, retrieve);
+assert.equal(rejectedSearch.ok, false);
 
 const read = await executeLocalTool({ name: "read_papers", arguments: { paper_ids: ["paper-a"], sections: ["method"] } }, papers, retrieve);
 assert.equal(read.papers.length, 1);

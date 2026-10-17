@@ -2,9 +2,15 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { sha256 } = require("./core.js");
 
-function endpointUrl(value) {
+function endpointUrl(value, provider = "api") {
   const url = new URL(String(value));
   const local = ["localhost", "127.0.0.1", "::1"].includes(url.hostname);
+  if (provider === "ollama") {
+    if (url.protocol !== "http:" || !local) throw new Error("Ollama endpoint must use local HTTP");
+    if (url.username || url.password || url.search || url.hash) throw new Error("Ollama endpoint must not contain credentials or query parameters");
+    url.pathname = `${url.pathname.replace(/\/+$/, "")}/api/embed`;
+    return url.toString();
+  }
   if (url.protocol !== "https:" && !(local && url.protocol === "http:")) throw new Error("Embedding endpoint must be HTTPS or local HTTP");
   if (url.username || url.password || url.search || url.hash) throw new Error("Embedding endpoint must not contain credentials or query parameters");
   url.pathname = url.pathname.replace(/\/+$/, "");
@@ -23,7 +29,18 @@ function validateInputFile(inputs) {
   }
 }
 
-async function requestVectors(endpoint, key, model, texts, fetchImpl = fetch) {
+async function requestVectors(endpoint, key, model, texts, fetchImpl = fetch, provider = "api") {
+  if (provider === "ollama") {
+    const response = await fetchImpl(endpoint, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model, input: texts }), signal: AbortSignal.timeout(60000)
+    });
+    if (!response.ok) throw new Error(`Ollama returned ${response.status}; confirm the local service and model are available.`);
+    const data = await response.json();
+    const vectors = Array.isArray(data?.embeddings) ? data.embeddings : [];
+    if (vectors.length !== texts.length || !vectors.every((v) => Array.isArray(v) && v.length && v.every((n) => typeof n === "number" && Number.isFinite(n)) && v.some((n) => n !== 0))) throw new Error("Ollama returned invalid vectors");
+    return { vectors, usage: null, responseModel: data.model || null };
+  }
   const multimodal = /\/embeddings\/multimodal\/?$/i.test(new URL(endpoint).pathname);
   if (multimodal && texts.length !== 1) throw new Error("Multimodal endpoint requires batch size 1");
   const body = multimodal
@@ -42,9 +59,9 @@ async function requestVectors(endpoint, key, model, texts, fetchImpl = fetch) {
 
 async function embedInputs({ inputs, out, endpoint, key, model, provider, revision, kind, maxInputs, batchSize, fetchImpl = fetch, progress = () => {} }) {
   validateInputFile(inputs);
-  if (!key || !model || !provider || !revision || !["real", "synthetic"].includes(kind)) throw new Error("Embedding key, model, provider, revision and kind required");
+  if ((!key && provider !== "ollama") || !model || !provider || !revision || !["real", "synthetic"].includes(kind)) throw new Error("Embedding key (except for Ollama), model, provider, revision and kind required");
   if (!Number.isInteger(maxInputs) || maxInputs < 1 || !Number.isInteger(batchSize) || batchSize < 1 || batchSize > 32) throw new Error("Invalid --max-inputs or --batch");
-  const url = endpointUrl(endpoint);
+  const url = endpointUrl(endpoint, provider);
   const multimodal = /\/embeddings\/multimodal\/?$/i.test(new URL(url).pathname);
   if (multimodal && batchSize !== 1) throw new Error("Multimodal endpoint requires --batch 1");
   fs.mkdirSync(out, { recursive: true });
@@ -86,7 +103,7 @@ async function embedInputs({ inputs, out, endpoint, key, model, provider, revisi
   let generated = 0;
   for (let offset = 0; offset < Math.min(remaining.length, maxInputs); offset += batchSize) {
     const batch = remaining.slice(offset, Math.min(offset + batchSize, maxInputs));
-    const result = await requestVectors(url, key, model, batch.map((entry) => entry.text), fetchImpl);
+    const result = await requestVectors(url, key, model, batch.map((entry) => entry.text), fetchImpl, provider);
     if (cache.model.responseModel && result.responseModel && cache.model.responseModel !== result.responseModel) throw new Error("Provider response model changed across batches");
     const dimension = result.vectors[0].length;
     if (result.vectors.some((v) => v.length !== dimension) || (cache.model.dimensions && cache.model.dimensions !== dimension)) throw new Error("Embedding dimension changed across batches");

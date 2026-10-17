@@ -20,6 +20,16 @@ assert.equal(config.enabled, true);
 assert.equal(config.baseUrl, "https://example.com/v1");
 assert.equal(config.apiKey, "chat-key");
 assert.equal(configKey(config), configKey({ ...config }));
+assert.equal(configKey(config), configKey({ ...config, provider: "api" }), "existing cloud vector cache keys must remain compatible");
+const localConfig = normalizeConfig({
+  embeddingEnabled: true,
+  embeddingProvider: "ollama",
+  embeddingBaseUrl: "http://127.0.0.1:11434",
+  embeddingModel: "bge-m3"
+});
+assert.equal(localConfig.provider, "ollama");
+assert.equal(localConfig.apiKey, "");
+assert.notEqual(configKey(config), configKey(localConfig), "cloud and local model vectors must not share a cache namespace");
 
 const passage = { passageId: "p1", text: "长尾识别与知识蒸馏" };
 assert.equal(passageFingerprint(passage), passageFingerprint({ ...passage }));

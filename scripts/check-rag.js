@@ -58,6 +58,26 @@ const results = searchPassages(index, "知识蒸馏", 5, { extractTerms: () => [
 assert.equal(results[0].pageNumber, 2);
 assert(results[0].text.includes("教师模型"));
 
+const chineseQuestion = searchPassages(index, "长尾识别如何缓解类别不平衡问题？", 5, { extractTerms: () => ["长尾识别如何缓解类别不平衡问题"] });
+assert.equal(chineseQuestion[0].paperId, "rag-paper", "Chinese question phrases should match title and keyword metadata");
+
+const acronymIndex = buildPassageIndex([{
+  id: "acronym-paper",
+  title: "Ordinal grading with CLIP-DR",
+  pageCount: 1,
+  keywords: ["排序感知提示"],
+  text: "CLIP-DR uses rank-aware prompts to model ordinal information."
+}]);
+const acronymQuestion = searchPassages(acronymIndex, "CLIP-DR 如何使用排序感知提示？", 5, { extractTerms: () => ["无关查询"] });
+assert.equal(acronymQuestion[0].paperId, "acronym-paper", "Latin acronyms should be extracted from mixed-language queries");
+
+const rarityIndex = buildPassageIndex([
+  { id: "common-paper", title: "Learning overview", text: "learning methods and learning systems", pageCount: 1, keywords: [] },
+  { id: "rare-paper", title: "Rare concept", text: "rare concept learning methods", pageCount: 1, keywords: [] }
+]);
+const rarityResults = searchPassages(rarityIndex, "learning rare concept", 5, { extractTerms: () => ["learning", "rare concept"] });
+assert.equal(rarityResults[0].paperId, "rare-paper", "specific rare query terms should outweigh ubiquitous terms");
+
 const vectorMap = new Map(index.passages.map((passage) => [
   passage.passageId,
   passage.pageNumber === 2 ? [1, 0] : [0, 1]

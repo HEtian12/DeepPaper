@@ -3236,6 +3236,7 @@ function currentConfig() {
     apiKey: profile?.apiKey || els.apiKeyInput.value.trim(),
     model: profile?.model || els.modelSelect.value,
     embeddingEnabled: Boolean(profile?.embeddingEnabled),
+    embeddingProvider: profile?.embeddingProvider || "api",
     embeddingBaseUrl: profile?.embeddingBaseUrl || "",
     embeddingApiKey: profile?.embeddingApiKey || "",
     embeddingModel: profile?.embeddingModel || "",
@@ -3258,6 +3259,7 @@ function normalizeApiProfiles(config) {
       apiKey: String(profile.apiKey || ""),
       model: String(profile.model || ""),
       embeddingEnabled: Boolean(profile.embeddingEnabled),
+      embeddingProvider: profile.embeddingProvider === "ollama" ? "ollama" : "api",
       embeddingBaseUrl: String(profile.embeddingBaseUrl || ""),
       embeddingApiKey: String(profile.embeddingApiKey || ""),
       embeddingModel: String(profile.embeddingModel || "")
@@ -3274,6 +3276,7 @@ function normalizeApiProfiles(config) {
     apiKey: String(config.apiKey || ""),
     model: String(config.model || (provider === "doubao" ? "" : "deepseek-chat")),
     embeddingEnabled: false,
+    embeddingProvider: "api",
     embeddingBaseUrl: "",
     embeddingApiKey: "",
     embeddingModel: ""
@@ -3372,11 +3375,18 @@ function ensureApiProfileUi() {
             <input id="apiProfileEmbeddingEnabled" type="checkbox" />
           </label>
           <div id="embeddingFields" class="embedding-fields hidden">
+            <div class="api-profile-field api-profile-field-wide">
+              <label for="apiProfileEmbeddingProvider">Embedding 运行方式</label>
+              <select id="apiProfileEmbeddingProvider">
+                <option value="api">云端 API</option>
+                <option value="ollama">本地 Ollama</option>
+              </select>
+            </div>
             <div class="api-profile-field">
               <label for="apiProfileEmbeddingBaseUrl">Embedding API 地址</label>
               <input id="apiProfileEmbeddingBaseUrl" type="url" placeholder="https://.../api/v3" />
             </div>
-            <div class="api-profile-field">
+            <div id="embeddingApiKeyField" class="api-profile-field">
               <label for="apiProfileEmbeddingKeyInput">Embedding API Key <span>可复用上方 Key</span></label>
               <input id="apiProfileEmbeddingKeyInput" type="password" autocomplete="off" placeholder="留空则复用模型 API Key" />
             </div>
@@ -3431,6 +3441,7 @@ function bindApiProfileUi() {
   document.querySelector("#closeApiProfileEditorBtn").addEventListener("click", closeApiProfileEditor);
   document.querySelector("#cancelApiProfileEditorBtn").addEventListener("click", closeApiProfileEditor);
   document.querySelector("#apiProfileEmbeddingEnabled").addEventListener("change", updateEmbeddingEditorState);
+  document.querySelector("#apiProfileEmbeddingProvider").addEventListener("change", updateEmbeddingProviderMode);
   document.querySelector("#apiProfileProviderInput").addEventListener("change", updateEmbeddingProviderDefaults);
   document.querySelector("#apiProfileModal").addEventListener("mousedown", (event) => {
     if (event.target === event.currentTarget) closeApiProfileEditor();
@@ -3465,12 +3476,14 @@ function openApiProfileEditor(profile) {
   document.querySelector("#apiProfileKeyInput").value = profile?.apiKey || "";
   document.querySelector("#apiProfileModelInput").value = profile?.model || "";
   document.querySelector("#apiProfileEmbeddingEnabled").checked = Boolean(profile?.embeddingEnabled);
+  document.querySelector("#apiProfileEmbeddingProvider").value = profile?.embeddingProvider === "ollama" ? "ollama" : "api";
   document.querySelector("#apiProfileEmbeddingBaseUrl").value = profile?.embeddingBaseUrl || (profile?.provider === "doubao" ? "https://ark.cn-beijing.volces.com/api/v3" : "");
   document.querySelector("#apiProfileEmbeddingKeyInput").value = profile?.embeddingApiKey || "";
   document.querySelector("#apiProfileEmbeddingModelInput").value = profile?.embeddingModel || "";
   document.querySelector(".embedding-config-details").open = Boolean(profile?.embeddingEnabled);
   document.querySelector("#deleteApiProfileBtn").classList.toggle("hidden", !profile);
   updateEmbeddingEditorState();
+  updateEmbeddingProviderMode();
   modal.classList.remove("hidden");
   document.querySelector("#apiProfileNameInput").focus();
 }
@@ -3486,6 +3499,30 @@ function updateEmbeddingEditorState() {
   if (status) {
     status.textContent = enabled ? "已启用" : "未启用";
     status.classList.toggle("active", Boolean(enabled));
+  }
+}
+
+function updateEmbeddingProviderMode() {
+  const local = document.querySelector("#apiProfileEmbeddingProvider")?.value === "ollama";
+  const address = document.querySelector("#apiProfileEmbeddingBaseUrl");
+  const addressLabel = document.querySelector('label[for="apiProfileEmbeddingBaseUrl"]');
+  const keyField = document.querySelector("#embeddingApiKeyField");
+  const model = document.querySelector("#apiProfileEmbeddingModelInput");
+  const hint = document.querySelector("#embeddingFields .field-hint");
+  if (local) {
+    if (address && (!address.value.trim() || address.value.startsWith("https://"))) address.value = "http://127.0.0.1:11434";
+    if (address) address.placeholder = "http://127.0.0.1:11434";
+    if (addressLabel) addressLabel.textContent = "本地 Ollama 地址";
+    if (model) model.placeholder = "如 qwen3-embedding（需先用 Ollama 下载）";
+    keyField?.classList.add("hidden");
+    if (hint) hint.textContent = "本地模式通过 Ollama 运行；首次需下载模型，下载后可离线向量化与检索。";
+  } else {
+    if (address && address.value.startsWith("http://127.0.0.1:11434")) address.value = "";
+    if (address) address.placeholder = "https://.../api/v3";
+    if (addressLabel) addressLabel.textContent = "Embedding API 地址";
+    if (model) model.placeholder = "如 doubao-embedding-vision-250615";
+    keyField?.classList.remove("hidden");
+    if (hint) hint.textContent = "保存后，在文献 Agent 中点击“更新语义索引”。";
   }
 }
 
@@ -3509,11 +3546,12 @@ function saveApiProfileFromEditor() {
     apiKey: document.querySelector("#apiProfileKeyInput").value.trim(),
     model,
     embeddingEnabled: document.querySelector("#apiProfileEmbeddingEnabled").checked,
+    embeddingProvider: document.querySelector("#apiProfileEmbeddingProvider").value === "ollama" ? "ollama" : "api",
     embeddingBaseUrl: document.querySelector("#apiProfileEmbeddingBaseUrl").value.trim(),
     embeddingApiKey: document.querySelector("#apiProfileEmbeddingKeyInput").value.trim(),
     embeddingModel: document.querySelector("#apiProfileEmbeddingModelInput").value.trim()
   };
-  if (profile.embeddingEnabled && (!profile.embeddingBaseUrl || !profile.embeddingModel || !(profile.embeddingApiKey || profile.apiKey))) {
+  if (profile.embeddingEnabled && (!profile.embeddingBaseUrl || !profile.embeddingModel || (profile.embeddingProvider !== "ollama" && !(profile.embeddingApiKey || profile.apiKey)))) {
     setStatus("Embedding 配置不完整：请填写 API 地址、模型，并提供可用的 API Key。", true);
     return;
   }

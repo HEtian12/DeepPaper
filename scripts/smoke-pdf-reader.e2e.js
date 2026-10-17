@@ -143,6 +143,15 @@ async function main() {
     request.on("end", () => {
       embeddingRequestCount += 1;
       const payload = JSON.parse(body || "{}");
+      if (request.url === "/api/embed") {
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({
+          model: payload.model,
+          embeddings: (Array.isArray(payload.input) ? payload.input : [payload.input])
+            .map((text) => String(text).includes("sentence") ? [1, 0, 0] : [0, 1, 0])
+        }));
+        return;
+      }
       if (request.url?.endsWith("/embeddings/multimodal")) {
         multimodalEmbeddingRequestCount += 1;
         const textPart = Array.isArray(payload.input) && payload.input.length === 1 ? payload.input[0] : null;
@@ -291,6 +300,12 @@ async function main() {
     const vectorStatus = await window.deepPaperVectorStore.getStatus(embeddingPassages, embeddingConfig);
     const metadataMap = await window.deepPaperVectorStore.getMetadataMap(embeddingPassages, embeddingConfig);
     const queryEmbedding = await window.deepPaper.createEmbeddings({ ...embeddingConfig, input: ["sentence"] });
+    const localEmbedding = await window.deepPaper.createEmbeddings({
+      embeddingProvider: "ollama",
+      embeddingBaseUrl: "http://127.0.0.1:${embeddingPort}",
+      embeddingModel: "bge-m3",
+      input: ["sentence", "local passage"]
+    });
     const multimodalEmbedding = await window.deepPaper.createEmbeddings({
       ...embeddingConfig,
       embeddingBaseUrl: "http://127.0.0.1:${embeddingPort}/v1/embeddings/multimodal",
@@ -367,6 +382,7 @@ async function main() {
         && metadataMap.get(ragIndex.passages[0].passageId)?.cleaningVersion === ragIndex.cleaningVersion,
       multimodalEmbeddingOk: multimodalEmbedding.ok,
       multimodalVectorCount: multimodalEmbedding.vectors?.length || 0,
+      localEmbeddingOk: localEmbedding.ok && localEmbedding.vectors?.length === 2 && localEmbedding.vectors[0]?.length === 3,
       hybridPassageId: hybridCandidates[0]?.passageId || "",
       hybridMode: hybridCandidates[0]?.retrievalMode || ""
     };
@@ -390,6 +406,7 @@ async function main() {
   if (!setup.multimodalEmbeddingOk || setup.multimodalVectorCount !== 2 || multimodalEmbeddingRequestCount !== 2) {
     throw new Error(`Volcengine multimodal Embedding IPC did not initialize: ${JSON.stringify(setup)}`);
   }
+  if (!setup.localEmbeddingOk) throw new Error(`Local Ollama Embedding IPC did not initialize: ${JSON.stringify(setup)}`);
   if (!embeddingBatchRejectionCount || !embeddingSingleFailureCount || embeddingRequestCount < 5) {
     throw new Error("Embedding indexing did not reduce rejected batches and retry temporary failures.");
   }
@@ -533,6 +550,7 @@ main()
   .finally(async () => {
     try {
       socket?.close();
+      embeddingServer?.closeAllConnections?.();
       embeddingServer?.close();
       if (electronProcess && !electronProcess.killed) electronProcess.kill();
       await wait(500);
@@ -542,4 +560,5 @@ main()
     } catch {
       // Best-effort cleanup of the isolated test instance.
     }
+    process.exit(process.exitCode || 0);
   });

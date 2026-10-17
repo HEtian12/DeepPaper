@@ -7,6 +7,7 @@
     const baseUrl = String(config.embeddingBaseUrl || config.baseUrl || "").trim().replace(/\/+$/, "");
     return {
       enabled: Boolean(config.embeddingEnabled ?? config.enabled),
+      provider: config.embeddingProvider === "ollama" || config.provider === "ollama" ? "ollama" : "api",
       baseUrl,
       apiKey: String(config.embeddingApiKey || config.apiKey || "").trim(),
       model: String(config.embeddingModel || config.model || "").trim()
@@ -30,7 +31,8 @@
 
   function configKey(config = {}) {
     const normalized = normalizeConfig(config);
-    return hashText(`${normalized.baseUrl}|${normalized.model}`);
+    const key = `${normalized.provider === "ollama" ? "ollama|" : ""}${normalized.baseUrl}|${normalized.model}`;
+    return hashText(key);
   }
 
   function passageFingerprint(passage) {
@@ -136,7 +138,7 @@
     const list = Array.isArray(passages) ? passages : [];
     if (!normalizeConfig(config).enabled) return { enabled: false, configured: false, total: list.length, indexed: 0, missing: list.length };
     const normalized = normalizeConfig(config);
-    const configured = Boolean(normalized.baseUrl && normalized.apiKey && normalized.model);
+    const configured = Boolean(normalized.baseUrl && normalized.model && (normalized.provider === "ollama" || normalized.apiKey));
     if (!configured) return { enabled: true, configured: false, total: list.length, indexed: 0, missing: list.length };
     const vectorMap = await getVectorMap(list, config);
     const firstVector = vectorMap.values().next().value;
@@ -226,7 +228,7 @@
   async function indexPassages(passages, config, embedTexts, onProgress = () => {}) {
     const list = Array.isArray(passages) ? passages.filter((passage) => passage?.passageId && passage?.text) : [];
     const normalized = normalizeConfig(config);
-    if (!normalized.enabled || !normalized.baseUrl || !normalized.apiKey || !normalized.model) {
+    if (!normalized.enabled || !normalized.baseUrl || !normalized.model || (normalized.provider !== "ollama" && !normalized.apiKey)) {
       throw new Error("请先在当前接口中完整配置并启用 Embedding。" );
     }
     if (typeof embedTexts !== "function") throw new Error("Embedding 调用模块未加载。" );

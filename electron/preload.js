@@ -22,7 +22,9 @@ contextBridge.exposeInMainWorld("deepPaper", {
   chatWithDeepSeek: (payload) => ipcRenderer.invoke("deepseek:chat", payload),
   chatWithLibrary: (payload) => ipcRenderer.invoke("library:ai-chat", payload),
   runAgentStep: (payload) => ipcRenderer.invoke("agent:step", payload),
+  cancelAgentRun: (runId) => ipcRenderer.invoke("agent:cancel", runId),
   verifyAgentAnswer: (payload) => ipcRenderer.invoke("agent:verify", payload),
   createEmbeddings: (payload) => ipcRenderer.invoke("embeddings:create", payload),
+  transcribeAudio: (payload) => ipcRenderer.invoke("audio:transcribe", payload),
   getDeepSeekBalance: (apiKey) => ipcRenderer.invoke("deepseek:balance", apiKey)
 });
